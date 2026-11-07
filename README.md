@@ -13,9 +13,20 @@ OM Workspace, Fujifilm's converter, the `<camera>\_EXPORT\TIFF16` layout).
 | Origin | EXIF `XPComment` (Explorer: "Comments") | XMP `dc:Relation` |
 |---|---|---|
 | RAW | `Source: RAW` | nothing (jxl-photo writes `jxlphoto-origin:tiff16`) |
-| 16-bit TIFF | `Source: TIFF 16-bit` | nothing (same) |
-| 8-bit TIFF | `Source: TIFF 8-bit` | `jxlphoto-origin:tiff8` |
-| JPEG | `Source: JPEG` | `jxlphoto-origin:jpeg` |
+| 16-bit TIFF | `Source: TIFF 16-bit, <profile>` | nothing (same) |
+| 8-bit TIFF | `Source: TIFF 8-bit, <profile>` | `jxlphoto-origin:tiff8` |
+| JPEG | `Source: JPEG, <profile>` | `jxlphoto-origin:jpeg` |
+
+`<profile>` is the colour profile of the ORIGINAL JPEG/TIFF (the export's own
+profile is the one Capture One chose): its ICC profile's name
+(`Adobe RGB (1998)`, `Nikon Adobe RGB 4.0.0.3001`, `LargeRGB-elle-V4-g22.icc`),
+or, when the original has no ICC, its EXIF colour space: `sRGB (EXIF, no ICC)`
+or `Adobe RGB (EXIF, no ICC)` (ColorSpace 2, or Uncalibrated + DCF `R03`, how
+many cameras mark an Adobe RGB JPEG). `no color profile` when the original has
+neither; nothing after the type when the original could not be read (the
+report says so, and a later run keeps a profile recorded earlier). A RAW gets
+no profile. A comment of an earlier version (`Source: JPEG`) gains the profile
+on the next run, without an override; another source type still needs one.
 
 Nothing else changes: the image bytes, the ICC profile and every other tag are
 checked before and after each write. The file's date does change, on purpose:
@@ -43,7 +54,8 @@ py photo_origin_tag.py G:\2024 G:\2025 G:\2026            # simulation
 py photo_origin_tag.py G:\2024 G:\2025 G:\2026 --apply    # write
 ```
 
-The report (CSV) and the per-file log land in `Logs\`. A second run changes
+The report (CSV, with a `profile` column) and the per-file log land in
+`Logs\`; the summary also counts the originals per colour profile. A second run changes
 nothing: an export that already carries the right tags is reported `ok` and not
 rewritten, so a re-run only reads the headers (~3 min for 7 000 exports).
 

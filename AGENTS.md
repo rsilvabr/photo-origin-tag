@@ -12,6 +12,14 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
 - Write ONLY the TIFF exports, then rebuild the masters and the copies. Never
   edit existing masters.
 - Comment text in English: `Source: RAW` / `JPEG` / `TIFF 8-bit` / `TIFF 16-bit`.
+- (08/11) The comment also names the ORIGINAL's colour profile for JPEG/TIFF
+  originals (`Source: JPEG, Adobe RGB (1998)`): the ICC description, else the
+  EXIF ColorSpace (`sRGB (EXIF, no ICC)` / `Adobe RGB (EXIF, no ICC)`), else
+  `no color profile`, only the NAME (never the base64 ICC). Not for RAW (the
+  export carries C1's profile). In XPComment only: jxl-photo never reads it.
+  "No profile" is said only of a file exiftool read cleanly (`profile_label`);
+  same source type + another profile = a fact, rewritten freely; another
+  source type still needs an override.
 - `jxlphoto-origin` only for `jpeg` and `tiff8` (the encoder writes `tiff16`
   itself; jxl-photo has no `raw` value). Never add another `jxlphoto-*` token:
   the namespace belongs to jxl-photo.
@@ -43,7 +51,12 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   removed) 66 s = no gain. The run moves ~205 MB/s = the HDD's limit. Do not
   add staging/batching/parallelism for one HDD without a new measurement.
 
-## State (07/11/2026)
+## State (08/11/2026)
+- v0.3.0: the original's colour profile in the comment, 36 tests. Simulation
+  on G:\2026 (1434 exports, classification unchanged): JPEG originals mostly
+  WITHOUT ICC (EXIF sRGB 77, EXIF Adobe 26 from Nikon D810/Zf/Z7/Z8), Xiaomi
+  `sRGB EOTF with DCI-P3 Color Gamut` 74, 4 with nothing (WhatsApp/scan);
+  TIFF originals: Elle V2/V4 g22 150, Nikon Adobe RGB 7, ProPhoto RGB 1.
 - v0.2.0 (stay_open exiftool, --workers), 29 tests. v0.1.0 committed (tag v0.1.0). Simulation on G:\2024-2026: 7154 exports → jpeg 1971,
   tiff8 7, tiff16 965, raw 4208, review 3 (JPG+TIF with the same name, listed
   in overrides.csv as comments). Applied to 20 real copies (every rule/year):

@@ -29,18 +29,48 @@ def _isolated(tmp_path, monkeypatch):
 
 
 def _icc():
-    # a tiny but well-formed-looking ICC blob is enough: only its bytes matter
+    # a blob exiftool cannot parse: only its bytes matter (an export's ICC)
     return bytes(range(256)) * 4
 
 
+def make_icc(desc: str) -> bytes:
+    """A minimal ICC v4 profile whose only tag is its description (mluc,
+    UTF-16BE): enough for exiftool's ProfileDescription."""
+    import struct
+    text = desc.encode("utf-16-be")
+    mluc = b"mluc" + b"\0" * 4 + struct.pack(">II", 1, 12) + b"enUS" \
+        + struct.pack(">II", len(text), 28) + text
+    mluc += b"\0" * (-len(mluc) % 4)
+    tag_table = struct.pack(">I", 1) + b"desc" + struct.pack(">II", 144, len(mluc))
+    size = 128 + len(tag_table) + len(mluc)
+    header = (struct.pack(">I", size) + b"\0" * 4 + struct.pack(">I", 0x04200000)
+              + b"mntrRGB XYZ " + b"\0" * 12 + b"acsp" + b"\0" * 88)
+    assert len(header) == 128
+    return header + tag_table + mluc
+
+
 def make_tiff(path: Path, bits=16, compression=None, icc=True):
+    """icc: True = an unparseable blob, bytes = that profile, False = none."""
     path.parent.mkdir(parents=True, exist_ok=True)
     dt = np.uint16 if bits == 16 else np.uint8
     rng = np.random.default_rng(len(path.name))
     a = rng.integers(0, np.iinfo(dt).max, size=(48, 64, 3), dtype=dt)
-    extratags = [(34675, 7, len(_icc()), _icc(), False)] if icc else []
+    blob = _icc() if icc is True else (icc or None)
+    extratags = [(34675, 7, len(blob), blob, False)] if blob else []
     tifffile.imwrite(str(path), a, photometric="rgb", compression=compression,
                      extratags=extratags, metadata=None)
+    return path
+
+
+def make_jpeg(path: Path, icc=None, exif_args=()):
+    """A real JPEG original: icc = profile bytes, exif_args = exiftool
+    assignments (e.g. '-ExifIFD:ColorSpace#=1')."""
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kw = {"icc_profile": icc} if icc else {}
+    Image.new("RGB", (16, 12), (40, 80, 120)).save(str(path), "JPEG", **kw)
+    if exif_args:
+        set_tags(path, *exif_args)
     return path
 
 
@@ -184,8 +214,9 @@ def library(tmp_path):
     for s in ("DSC_0001", "DSC_0002"):
         touch(base / f"{s}.NEF"); touch(base / f"{s}.JPG")
     touch(base / "DSC_0003.JPG")
-    make_tiff(base / "DSC_0004_NXstudio.TIF", bits=16)
-    make_tiff(base / "DSC_0005.tif", bits=8)
+    make_tiff(base / "DSC_0004_NXstudio.TIF", bits=16,
+              icc=make_icc("LargeRGB-elle-V4-g22.icc"))
+    make_tiff(base / "DSC_0005.tif", bits=8, icc=False)
     touch(base / "DSC_0006.NEF"); touch(base / "DSC_0006.JPG")
     e = {
         "raw": export_of(base, "DSC_0001", "Blue"),
@@ -219,8 +250,9 @@ def test_apply_writes_the_right_tags(library, tmp_path):
     assert tags(e["raw"]) == ([], "Source: RAW")
     assert tags(e["pairjpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
     assert tags(e["jpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
-    assert tags(e["tiff16"]) == ([], "Source: TIFF 16-bit")
-    assert tags(e["tiff8"]) == (["jxlphoto-origin:tiff8"], "Source: TIFF 8-bit")
+    assert tags(e["tiff16"]) == ([], "Source: TIFF 16-bit, LargeRGB-elle-V4-g22.icc")
+    assert tags(e["tiff8"]) == (["jxlphoto-origin:tiff8"],
+                                "Source: TIFF 8-bit, no color profile")
     assert tags(e["contra"]) == ([], None)
     assert tags(e["orphan"]) == ([], None)
     assert not list((tmp_path / HOSTILE).rglob(f"*{pot.TEMP_MARK}*"))
@@ -387,7 +419,8 @@ def test_workers_and_spawn_mode_write_the_same(library, tmp_path, monkeypatch,
     assert not pot._ALL_PROCS                  # every exiftool closed at the end
     assert tags(e["raw"]) == ([], "Source: RAW")
     assert tags(e["jpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
-    assert tags(e["tiff8"]) == (["jxlphoto-origin:tiff8"], "Source: TIFF 8-bit")
+    assert tags(e["tiff8"]) == (["jxlphoto-origin:tiff8"],
+                                "Source: TIFF 8-bit, no color profile")
     assert not list((tmp_path / HOSTILE).rglob(f"*{pot.TEMP_MARK}*"))
     pot.close_exiftools()
 
@@ -431,6 +464,124 @@ def test_unused_override_is_reported(tmp_path, capsys):
     assert "matched nothing" in capsys.readouterr().out
 
 
+# ------------------------------------------------- the original's profile
+def test_profile_label_rules():
+    L = pot.profile_label
+    icc = "(Binary data 544 bytes, use -b option to extract)"
+    assert L(None) is None
+    assert L({"ICC_Profile:ICC_Profile": icc,
+              "ICC_Profile:ProfileDescription": "Adobe RGB (1998)",
+              "ExifIFD:ColorSpace": 1}) == "Adobe RGB (1998)"        # ICC wins
+    assert L({"ICC_Profile:ICC_Profile": icc}) == pot.PROFILE_UNNAMED
+    assert L({"File:FileType": "JPEG", "ExifIFD:ColorSpace": 1}) == pot.PROFILE_EXIF_SRGB
+    assert L({"File:FileType": "JPEG", "ExifIFD:ColorSpace": 65535,
+              "InteropIFD:InteropIndex": "R03"}) == pot.PROFILE_EXIF_ADOBE
+    assert L({"File:FileType": "JPEG", "ExifIFD:ColorSpace": 2}) == pot.PROFILE_EXIF_ADOBE
+    assert L({"File:FileType": "JPEG", "ExifIFD:ColorSpace": 65535}) == pot.PROFILE_NONE
+    assert L({"File:FileType": "TIFF"}) == pot.PROFILE_NONE
+    # nothing found in a file exiftool could not parse is not "no profile"
+    assert L({"File:FileType": "TXT"}) is None
+    assert L({"File:FileType": "JPEG", "ExifTool:Warning": "JPEG format error"}) is None
+    assert L({}) is None
+    odd = L({"ICC_Profile:ICC_Profile": icc,
+             "ICC_Profile:ProfileDescription": "a\nb\tc  " + "x" * 300})
+    assert odd.startswith("a b c x") and len(odd) == pot.PROFILE_MAX_LEN
+    assert "\n" not in odd
+
+
+def test_comment_text():
+    assert pot.comment_for("jpeg", "sRGB IEC61966-2.1") == "Source: JPEG, sRGB IEC61966-2.1"
+    assert pot.comment_for("raw", "Adobe RGB (1998)") == "Source: RAW"
+    assert pot.comment_for("tiff8", None) == "Source: TIFF 8-bit"
+    assert pot.comment_kind("Source: TIFF 16-bit, ProPhoto RGB") == "tiff16"
+    assert pot.comment_kind("Source: TIFF 8-bit") == "tiff8"
+    assert pot.comment_kind("Source: JPEGX") is None
+    assert pot.comment_kind("my note") is None
+
+
+def test_source_file_follows_the_decided_kind():
+    exts = {".nef": "a.NEF", ".jpg": "a.JPG", ".tif": "a.TIF"}
+    assert pot.source_file("jpeg", exts) == "a.JPG"
+    assert pot.source_file("tiff16", exts) == "a.TIF"
+    assert pot.source_file("raw", exts) is None
+    assert pot.source_file("jpeg", {".nef": "a.NEF"}) is None   # override, no JPEG
+
+
+ADOBE = "Adobe RGB (1998)"
+
+
+@real
+def test_the_comment_names_the_originals_profile(tmp_path):
+    base = tmp_path / HOSTILE / "01_mixed"
+    make_jpeg(base / "A_icc.JPG", icc=make_icc(ADOBE))
+    make_jpeg(base / "B_exif_srgb.JPG", exif_args=["-ExifIFD:ColorSpace#=1"])
+    make_jpeg(base / "C_dcf_adobe.JPG", exif_args=["-ExifIFD:ColorSpace#=65535",
+                                                   "-InteropIFD:InteropIndex=R03"])
+    make_jpeg(base / "D_nothing.JPG")
+    make_jpeg(base / "E_jp.JPG", icc=make_icc("カスタム プロファイル [v2]"))
+    make_tiff(base / "F_tif.tif", bits=16, icc=make_icc("ProPhoto RGB"))
+    touch(base / "G_raw.NEF")                       # NEF+JPEG exported from the RAW
+    make_jpeg(base / "G_raw.JPG", icc=make_icc(ADOBE))
+    e = {s: export_of(base, s, "Blue" if s == "G_raw" else "Green")
+         for s in ("A_icc", "B_exif_srgb", "C_dcf_adobe", "D_nothing", "E_jp",
+                   "F_tif", "G_raw")}
+    set_tags(e["G_raw"], "-ExifIFD:SubjectDistance=3.5")
+    assert run(base, "--apply") == 0
+    assert tags(e["A_icc"])[1] == "Source: JPEG, Adobe RGB (1998)"
+    assert tags(e["B_exif_srgb"])[1] == "Source: JPEG, sRGB (EXIF, no ICC)"
+    assert tags(e["C_dcf_adobe"])[1] == "Source: JPEG, Adobe RGB (EXIF, no ICC)"
+    assert tags(e["D_nothing"])[1] == "Source: JPEG, no color profile"
+    assert tags(e["E_jp"])[1] == "Source: JPEG, カスタム プロファイル [v2]"
+    assert tags(e["F_tif"]) == ([], "Source: TIFF 16-bit, ProPhoto RGB")
+    assert tags(e["G_raw"]) == ([], "Source: RAW")   # C1's profile, not the JPEG's
+    rows = report_rows(tmp_path)
+    assert rows[e["A_icc"].name]["profile"] == ADOBE
+    assert rows[e["G_raw"].name]["profile"] == ""
+
+
+@real
+def test_an_unreadable_original_gets_no_profile_and_keeps_an_earlier_one(tmp_path):
+    base = tmp_path / HOSTILE / "x"
+    touch(base / "a.JPG")                          # not a JPEG exiftool can read
+    p = export_of(base, "a")
+    assert run(base, "--apply") == 0
+    assert tags(p) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
+    assert "unreadable" in report_rows(tmp_path)[p.name]["reason"]
+    set_tags(p, "-IFD0:XPComment=Source: JPEG, Adobe RGB (1998)")
+    b = p.read_bytes()
+    assert run(base, "--apply") == 0               # still unreadable: keep it
+    assert p.read_bytes() == b
+    assert report_rows(tmp_path)[p.name]["action"] == "ok"
+
+
+@real
+def test_a_v02_comment_gains_the_profile_without_an_override(tmp_path):
+    base = tmp_path / HOSTILE / "x"
+    make_jpeg(base / "a.JPG", icc=make_icc(ADOBE))
+    p = export_of(base, "a")
+    set_tags(p, "-IFD0:XPComment=Source: JPEG", "-XMP-dc:Relation+=jxlphoto-origin:jpeg")
+    assert run(base, "--apply") == 0
+    assert tags(p) == (["jxlphoto-origin:jpeg"], "Source: JPEG, Adobe RGB (1998)")
+    # the original re-saved in another profile: the comment follows it
+    make_jpeg(base / "a.JPG", icc=make_icc("sRGB IEC61966-2.1"))
+    assert run(base, "--apply") == 0
+    assert tags(p)[1] == "Source: JPEG, sRGB IEC61966-2.1"
+    assert run(base, "--apply") == 0
+    assert report_rows(tmp_path)[p.name]["action"] == "ok"
+
+
+@real
+def test_another_source_type_with_a_profile_still_needs_an_override(tmp_path):
+    base = tmp_path / HOSTILE / "x"
+    make_jpeg(base / "a.JPG", icc=make_icc(ADOBE))
+    p = export_of(base, "a")
+    set_tags(p, "-IFD0:XPComment=Source: TIFF 8-bit, Adobe RGB (1998)")
+    b = p.read_bytes()
+    assert run(base, "--apply") == 0
+    assert p.read_bytes() == b
+    assert report_rows(tmp_path)[p.name]["action"] == "refuse"
+
+
 # ---------------------------------------------------------- end to end
 JXL_PHOTO = REPO.parent / "jxl-photo"
 HAVE_CODECS = all(shutil.which(t) for t in ("cjxl", "djxl", "exiftool", "magick"))
@@ -440,7 +591,7 @@ HAVE_CODECS = all(shutil.which(t) for t in ("cjxl", "djxl", "exiftool", "magick"
                     reason="needs jxl-photo beside this repo and cjxl/djxl/magick")
 def test_jxl_photo_master_inherits_origin_and_comment(tmp_path):
     base = tmp_path / HOSTILE / "01_C5050"
-    touch(base / "P1010001.JPG")
+    make_jpeg(base / "P1010001.JPG", exif_args=["-ExifIFD:ColorSpace#=1"])
     p = export_of(base, "P1010001", "Green")
     assert run(base, "--apply") == 0
     env = dict(os.environ, JXLPHOTO_LOG_DIR=str(tmp_path / "_jxlogs"),
@@ -457,4 +608,4 @@ def test_jxl_photo_master_inherits_origin_and_comment(tmp_path):
     e = json.loads(so)[0]
     assert "jxlphoto-origin:jpeg" in pot._as_list(e.get("XMP-dc:Relation"))
     comments = [v for k, v in e.items() if k.endswith(":XPComment")]
-    assert comments == ["Source: JPEG"], e
+    assert comments == ["Source: JPEG, sRGB (EXIF, no ICC)"], e

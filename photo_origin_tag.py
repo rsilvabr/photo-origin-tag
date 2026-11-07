@@ -5,7 +5,9 @@ export into a master.
 
 What is written (see SPEC.md):
   * EXIF IFD0 XPComment  "Source: RAW" / "Source: JPEG" / "Source: TIFF 8-bit"
-    / "Source: TIFF 16-bit" (Windows Explorer shows it as "Comments");
+    / "Source: TIFF 16-bit" (Windows Explorer shows it as "Comments"); for a
+    JPEG or TIFF original, followed by that original's colour profile name:
+    "Source: JPEG, Adobe RGB (1998)", "Source: JPEG, sRGB (EXIF, no ICC)";
   * XMP dc:Relation      jxlphoto-origin:jpeg or jxlphoto-origin:tiff8, only
     where it differs from what jxl-photo's encoder would write by itself
     (tiff16). The encoder inherits a jxlphoto-origin already in its input.
@@ -53,6 +55,17 @@ COMMENTS = {
     "tiff8": "Source: TIFF 8-bit",
     "tiff16": "Source: TIFF 16-bit",
 }
+# The original's colour profile follows the source type in the comment
+# ("Source: JPEG, Adobe RGB (1998)"), for JPEG and TIFF originals only: a RAW
+# has no profile of its own (the export's profile is the one C1 chose).
+PROFILE_IN_COMMENT = True
+PROFILE_SEP = ", "
+# No ICC profile in the original: the EXIF colour space tag, when it names one.
+PROFILE_EXIF_SRGB = "sRGB (EXIF, no ICC)"            # ColorSpace = 1
+PROFILE_EXIF_ADOBE = "Adobe RGB (EXIF, no ICC)"      # ColorSpace = 2, or 65535 + R03
+PROFILE_NONE = "no color profile"                    # neither ICC nor EXIF colour space
+PROFILE_UNNAMED = "unnamed ICC profile"              # an ICC without a description
+PROFILE_MAX_LEN = 120                                # longer descriptions are cut
 # jxlphoto-origin value per kind; None = leave it to jxl-photo's encoder,
 # which writes tiff16 for a 16-bit TIFF by itself.
 ORIGIN_TOKENS = {"raw": None, "tiff16": None, "jpeg": "jpeg", "tiff8": "tiff8"}
@@ -81,7 +94,7 @@ REWRITE_VOLATILE = {
     "IFD0:ExifOffset", "IFD0:GPSInfo", "IFD0:XMP", "IFD0:IPTC-NAA",
     "ExifIFD:InteropOffset",
 }
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)
@@ -484,6 +497,74 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None) -> Decision:
 
 
 # ---------------------------------------------------------------------------
+# The original's colour profile (pure: no I/O)
+# ---------------------------------------------------------------------------
+PROFILE_TAGS = ["-ICC_Profile", "-ICC_Profile:ProfileDescription",
+                "-ExifIFD:ColorSpace", "-InteropIFD:InteropIndex",
+                "-File:FileType", "-ExifTool:Warning", "-ExifTool:Error"]
+
+
+def source_file(kind, exts: dict):
+    """The original file name whose profile the comment names: the JPEG for
+    'jpeg', the TIFF for 'tiff8'/'tiff16', None for 'raw' or when no such
+    original is beside the export (an override may name a kind that is)."""
+    if kind == "jpeg":
+        pick = sorted(e for e in exts if e in JPEG_EXTS)
+    elif kind in ("tiff8", "tiff16"):
+        pick = sorted(e for e in exts if e in TIFF_EXTS)
+    else:
+        return None
+    return exts[pick[0]] if pick else None
+
+
+def _clean_text(s: str) -> str:
+    s = "".join(ch if ch.isprintable() else " " for ch in str(s))
+    s = " ".join(s.split())
+    if len(s) > PROFILE_MAX_LEN:
+        s = s[:PROFILE_MAX_LEN - 3].rstrip() + "..."
+    return s
+
+
+def profile_label(entry):
+    """The colour profile name of an original from its exiftool entry (-G1
+    -n, PROFILE_TAGS), or None when the original could not be read. The ICC
+    profile wins (it is what an application uses); without one, the EXIF
+    colour space tag. "No profile" is only said of a file exiftool read
+    cleanly: finding nothing in a file it could not parse (wrong type, a
+    format error, a truncated file) is None, never a guess."""
+    if entry is None:
+        return None
+    if "ICC_Profile:ICC_Profile" in entry:
+        return _clean_text(entry.get("ICC_Profile:ProfileDescription") or "") \
+            or PROFILE_UNNAMED
+    cs = str(entry.get("ExifIFD:ColorSpace", "")).strip()
+    interop = str(entry.get("InteropIFD:InteropIndex", "")).strip().upper()
+    if cs == "1":
+        return PROFILE_EXIF_SRGB
+    if cs == "2" or (cs == "65535" and interop == "R03"):
+        return PROFILE_EXIF_ADOBE
+    clean = (str(entry.get("File:FileType", "")).upper() in ("JPEG", "TIFF")
+             and not entry.get("ExifTool:Error")
+             and not entry.get("ExifTool:Warning"))
+    return PROFILE_NONE if clean else None
+
+
+def comment_for(kind, profile=None) -> str:
+    c = COMMENTS[kind]
+    if PROFILE_IN_COMMENT and profile and kind != "raw":
+        c += PROFILE_SEP + profile
+    return c
+
+
+def comment_kind(text: str):
+    """The kind a comment this script wrote names ('jpeg', ...), or None."""
+    for k, c in COMMENTS.items():
+        if text == c or text.startswith(c + PROFILE_SEP):
+            return k
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Planning: what to write
 # ---------------------------------------------------------------------------
 @dataclass
@@ -497,10 +578,13 @@ class Item:
     relation_add: str = None  # token to add
     relation_remove: list = field(default_factory=list)
     comment: str = None       # XPComment to write
+    profile: str = None       # the original's colour profile, None = not read
 
 
 def plan_item(it: Item, meta: dict, overridden: bool):
-    """Fill it.action and what to write, from the export's current tags."""
+    """Fill it.action and what to write, from the export's current tags.
+    it.profile (set by the caller) is the original's colour profile, or None
+    when it was not read (RAW, or the original is unreadable)."""
     d = it.decision
     if d.kind is None:
         it.action, it.reason = "review", d.review
@@ -530,14 +614,22 @@ def plan_item(it: Item, meta: dict, overridden: bool):
         it.relation_remove = bad
     if want_full and want_full not in have:
         it.relation_add = want_full
-    want_c = COMMENTS[d.kind]
+    want_c = comment_for(d.kind, it.profile)
     cur_c = str(meta.get("IFD0:XPComment", "") or "")
     if cur_c.strip() and cur_c != want_c:
         if not cur_c.startswith(COMMENT_PREFIX):
             it.action = "refuse"
             it.reason = f"XPComment already holds someone else's text: {cur_c[:60]!r}"
             return
-        if not overridden:
+        same_kind = comment_kind(cur_c) == d.kind
+        if same_kind and it.profile is None and d.kind != "raw":
+            # the original could not be read this time: keep the profile an
+            # earlier run recorded rather than dropping it
+            want_c = cur_c
+        elif not same_kind and not overridden:
+            # the same source type with another profile is a fact read from
+            # the original, rewritten freely; another source type is a rule
+            # decision, replaced only by an override
             it.action = "refuse"
             it.reason = (f"XPComment says {cur_c!r}, rules say {want_c!r}: "
                          f"only an override replaces it")
@@ -635,7 +727,7 @@ def write_item(it: Item):
         if (st1.st_size, st1.st_mtime_ns) != (st0.st_size, st0.st_mtime_ns):
             raise OSError("the export changed while it was being tagged")
         os.replace(tmp, src)
-        it.action, it.reason = "written", ""
+        it.action = "written"             # a planning note stays in the report
     except Exception as e:  # noqa: BLE001 - every failure is reported per file
         it.action, it.reason = "error", f"{type(e).__name__}: {e}"
     finally:
@@ -694,8 +786,11 @@ def build_items(exports, overrides):
             origs[_key(tpath)] = tpath
         items.append((it, m, exts, tpath))
     p2 = Progress("reading original TIFFs")
-    bits = read_tags(list(origs.values()), ["-IFD0:BitsPerSample"],
-                     extra=["-fast2"], progress=p2) if origs else {}
+    # one read gives the TIFF's depth (for the rules) and its profile
+    orig_meta = read_tags(list(origs.values()),
+                          ["-IFD0:BitsPerSample", *PROFILE_TAGS],
+                          extra=["-fast2"], progress=p2) if origs else {}
+    decided = []
     for it, m, exts, tpath in items:
         if m is None:
             continue
@@ -704,10 +799,25 @@ def build_items(exports, overrides):
             ov.used += 1
         tb = None
         if tpath is not None:
-            e = bits.get(_key(tpath))
+            e = orig_meta.get(_key(tpath))
             tb = e.get("IFD0:BitsPerSample") if e else None
         it.decision = classify(exts, m, tb, ov)
+        src = source_file(it.decision.kind, exts) if PROFILE_IN_COMMENT else None
+        decided.append((it, m, ov, export_base(it.path) / src if src else None))
+    # the profile of the JPEG originals the rules picked (read only for those)
+    jpgs = {_key(s): s for _, _, _, s in decided
+            if s is not None and _key(s) not in orig_meta}
+    if jpgs:
+        orig_meta.update(read_tags(list(jpgs.values()), PROFILE_TAGS,
+                                   extra=["-fast2"],
+                                   progress=Progress("reading original JPEGs")))
+    for it, m, ov, src in decided:
+        if src is not None:
+            it.profile = profile_label(orig_meta.get(_key(src)))
         plan_item(it, m, ov is not None)
+        if (src is not None and it.profile is None
+                and it.action in ("write", "ok") and not it.reason):
+            it.reason = "original unreadable: its colour profile is not recorded"
     return [t[0] for t in items]
 
 
@@ -716,11 +826,11 @@ def write_report(items, path: Path):
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["action", "origin", "decided_by", "reason", "label",
-                    "model", "original", "path"])
+                    "model", "original", "profile", "path"])
         for it in items:
             w.writerow([it.action, it.decision.kind or "", it.decision.by,
                         it.reason, it.label, it.model, it.decision.original,
-                        str(it.path)])
+                        it.profile or "", str(it.path)])
 
 
 def main(argv=None):
@@ -807,6 +917,13 @@ def _main(a):
     print("\nSummary (action, origin): count")
     for (act, kind), n in sorted(c.items()):
         print(f"  {act:<8} {kind:<7} {n}")
+    pc = Counter((it.decision.kind, it.profile or "(not read)") for it in items
+                 if it.decision.kind not in (None, "raw")
+                 and it.action in ("write", "written", "ok"))
+    if pc:
+        print("\nColour profile of the originals (origin, profile): count")
+        for (kind, prof), n in sorted(pc.items()):
+            print(f"  {kind:<7} {prof}  {n}")
     for ov in overrides:
         if not ov.used:
             print(f"  WARNING: override line {ov.line} matched nothing: {ov.path}")

@@ -14,6 +14,13 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
 | TIFF 8-bit | `jxlphoto-origin:tiff8` | `Source: TIFF 8-bit` |
 | JPEG | `jxlphoto-origin:jpeg` | `Source: JPEG` |
 
+- (08/11, v0.3.0) Para original JPEG/TIFF, o comentário leva também o NOME do
+  perfil de cor do original: `Source: JPEG, Adobe RGB (1998)`. Sem ICC, vale a
+  tag EXIF ColorSpace (`sRGB (EXIF, no ICC)`, `Adobe RGB (EXIF, no ICC)` =
+  ColorSpace 2 ou Uncalibrated + R03); sem nenhum dos dois, `no color
+  profile`; original ilegível = só o tipo (nunca chuta). RAW não leva perfil
+  (o export tem o perfil que o C1 escolheu). Só no XPComment, que o jxl-photo
+  não lê; nunca o ICC em base64.
 - O vocabulário de `jxlphoto-origin` é o do jxl-photo, que não tem `raw`.
   Por isso o RAW fica `tiff16` no token e só o comentário diz RAW.
 - O encoder herda um `jxlphoto-origin` já gravado no TIFF
@@ -54,6 +61,8 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
 - O TIFF já tem OUTRA origem → recusa. Só um override troca.
 - O `XPComment` já tem um texto que não é deste script → recusa o arquivo
   (nunca apaga um comentário do dono).
+- O `XPComment` deste script com o MESMO tipo e outro perfil (ou sem perfil,
+  da v0.2) → reescreve sem override: o perfil é lido do original, não é regra.
 - Arquivo modificado entre a leitura e a escrita, travado ou em uso → recusa.
 
 ## 4. Segurança da escrita

@@ -44,7 +44,18 @@ py photo_origin_tag.py G:\2024 G:\2025 G:\2026 --apply    # write
 ```
 
 The report (CSV) and the per-file log land in `Logs\`. A second run changes
-nothing. `presets_LOCAL\JXL 9 - ORIGEM + MASTERS + COPIAS.bat` runs the
+nothing: an export that already carries the right tags is reported `ok` and not
+rewritten, so a re-run only reads the headers (~3 min for 7 000 exports).
+
+## Speed
+
+One exiftool stays open for the whole run (`-stay_open`); exiftool is never
+started per file. Writing rewrites each TIFF once, so the run is bound by the
+disk: measured on one HDD with 40 real exports (6.7 GB), 66 s -- about 205 MB/s
+of reads plus writes, the drive's limit (v0.1.0, three exiftool processes per
+file: 87 s). `--workers 2` was slower on that disk (74 s), and reading 25 files
+ahead before writing them made no difference, so the default stays at one.
+Estimate for 1.07 TB of exports on that drive: about 3 hours. `presets_LOCAL\JXL 9 - ORIGEM + MASTERS + COPIAS.bat` runs the
 simulation, asks, tags, then SYNC PHOTOS, SRGB and JPG MOBILE.
 
 Refusals (never overwritten): a different `jxlphoto-origin` or a `Source:`

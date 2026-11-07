@@ -25,6 +25,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,7 +62,14 @@ OVERRIDES_FILE = "overrides.csv"     # next to this script unless --overrides
 LOG_DIR = "Logs"                     # next to this script; env PHOTO_ORIGIN_TAG_LOG_DIR
 EXIFTOOL = "exiftool"
 EXIFTOOL_TIMEOUT = 600               # seconds, per call
+EXIFTOOL_STAY_OPEN = True            # one exiftool per worker for the whole run
+                                     # (a new process per call cost ~0.3 s, 3x per file)
 READ_BATCH = 200                     # files per planning-time exiftool read
+WRITE_WORKERS = 1                    # files written at once (--workers). Measured on
+                                     # one HDD, 40 real exports (6.7 GB): 1 worker 66 s,
+                                     # 2 workers 74 s; reading 25 files ahead made no
+                                     # difference -- the run already moves ~205 MB/s,
+                                     # the disk's limit (2026-11-07)
 TEMP_MARK = "~origin-tag-tmp"        # temporary files carry this in the name
 # Tags exiftool may change when it rewrites a TIFF, besides the two we write.
 # Anything else differing between the original and the rewritten copy is an
@@ -73,7 +81,7 @@ REWRITE_VOLATILE = {
     "IFD0:ExifOffset", "IFD0:GPSInfo", "IFD0:XMP", "IFD0:IPTC-NAA",
     "ExifIFD:InteropOffset",
 }
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)
@@ -92,7 +100,119 @@ def _key(p) -> str:
 # ---------------------------------------------------------------------------
 # exiftool
 # ---------------------------------------------------------------------------
+_ARG_PREFIX = ["-charset", "filename=utf8", "-api", "WindowsLongPath=1"]
+
+
+def _check_args(args):
+    for a in args:
+        if "\n" in str(a) or "\r" in str(a):
+            raise ValueError(f"newline in exiftool argument: {a!r}")
+
+
+class ExifToolProcess:
+    """One `exiftool -stay_open True -@ -` kept for the whole run. Each command
+    is sent on stdin as UTF-8 argument lines (the same argfile semantics as
+    `-@ file`: Japanese, [ ], %, long paths) and ends with -executeN; stdout is
+    read up to {readyN} and stderr up to the -echo4 marker. exiftool gives no
+    per-command exit code in this mode: an 'Error' line on stderr counts as 1."""
+
+    def __init__(self):
+        import queue
+        import threading
+        self._q = queue
+        self.p = subprocess.Popen([EXIFTOOL, "-stay_open", "True", "-@", "-"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        self.n = 0
+        self.out_q, self.err_q = queue.Queue(), queue.Queue()
+        for stream, q in ((self.p.stdout, self.out_q), (self.p.stderr, self.err_q)):
+            threading.Thread(target=self._pump, args=(stream, q), daemon=True).start()
+
+    @staticmethod
+    def _pump(stream, q):
+        for line in iter(stream.readline, b""):
+            q.put(line)
+        q.put(None)                       # the process ended
+
+    def _collect(self, q, marker, deadline):
+        lines = []
+        while True:
+            left = deadline - time.time()
+            if left <= 0:
+                raise TimeoutError("exiftool did not answer in time")
+            try:
+                line = q.get(timeout=left)
+            except self._q.Empty:
+                continue
+            if line is None:
+                raise OSError("exiftool stopped")
+            text = line.decode("utf-8", "replace")
+            if text.strip() == marker:
+                return "".join(lines)
+            lines.append(text)
+
+    def run(self, args, timeout=EXIFTOOL_TIMEOUT):
+        _check_args(args)
+        self.n += 1
+        n = self.n
+        payload = [*_ARG_PREFIX, *[str(a) for a in args],
+                   "-echo4", f"{{done{n}}}", f"-execute{n}"]
+        self.p.stdin.write(("\n".join(payload) + "\n").encode("utf-8"))
+        self.p.stdin.flush()
+        deadline = time.time() + timeout
+        out = self._collect(self.out_q, f"{{ready{n}}}", deadline)
+        err = self._collect(self.err_q, f"{{done{n}}}", deadline)
+        rc = 1 if any(ln.startswith("Error") for ln in err.splitlines()) else 0
+        return rc, out, err
+
+    def close(self):
+        try:
+            self.p.stdin.write(b"-stay_open\nFalse\n")
+            self.p.stdin.flush()
+            self.p.wait(timeout=30)
+        except Exception:  # noqa: BLE001
+            self.p.kill()
+
+
+_tls = threading.local()
+
+
+def _thread_exiftool():
+    """This thread's persistent exiftool, started on first use."""
+    et = getattr(_tls, "et", None)
+    if et is None or et.p.poll() is not None:
+        et = ExifToolProcess()
+        _tls.et = et
+        _ALL_PROCS.append(et)
+    return et
+
+
+_ALL_PROCS = []
+
+
+def close_exiftools():
+    while _ALL_PROCS:
+        _ALL_PROCS.pop().close()
+
+
 def run_exiftool(args, timeout=EXIFTOOL_TIMEOUT):
+    """Run one exiftool command. Returns (returncode, stdout, stderr).
+    With EXIFTOOL_STAY_OPEN the command goes to this thread's persistent
+    process; a process that times out or dies is killed and the call raises
+    (the caller reports that file as an error, the next call starts a fresh
+    process)."""
+    if not EXIFTOOL_STAY_OPEN:
+        return _run_exiftool_spawn(args, timeout)
+    et = _thread_exiftool()
+    try:
+        return et.run(args, timeout)
+    except Exception:
+        et.p.kill()
+        _tls.et = None
+        raise
+
+
+def _run_exiftool_spawn(args, timeout=EXIFTOOL_TIMEOUT):
     """Run exiftool with `args` in a UTF-8 argfile (Japanese, [ ], %, long
     paths). Returns (returncode, stdout, stderr)."""
     import tempfile
@@ -614,7 +734,19 @@ def main(argv=None):
                     help=f"overrides CSV (default: {OVERRIDES_FILE} next to "
                          f"the script)")
     ap.add_argument("--report", default=None, help="report CSV path")
+    ap.add_argument("--workers", type=int, default=WRITE_WORKERS,
+                    help=f"files written at once (default {WRITE_WORKERS})")
     a = ap.parse_args(argv)
+    if a.workers < 1:
+        print("ERROR: --workers must be at least 1", file=sys.stderr)
+        return 2
+    try:
+        return _main(a)
+    finally:
+        close_exiftools()
+
+
+def _main(a):
 
     if a.apply:
         try:
@@ -649,14 +781,24 @@ def main(argv=None):
         logf.parent.mkdir(parents=True, exist_ok=True)
         p = Progress("writing")
         with open(logf, "a", encoding="utf-8") as lg:
-            for n, it in enumerate(todo, 1):
-                write_item(it)
+            def done(n, it):
                 lg.write(f"{_dt.datetime.now():%H:%M:%S}\t{it.action}\t"
                          f"{it.decision.kind}\t{it.reason}\t{it.path}\n")
                 lg.flush()
                 if it.action == "error":
                     print(f"\n  ERROR {it.path}: {it.reason}")
                 p(n, len(todo))
+            if a.workers == 1:
+                for n, it in enumerate(todo, 1):
+                    write_item(it)
+                    done(n, it)
+            else:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=a.workers) as ex:
+                    futs = {ex.submit(write_item, it): it for it in todo}
+                    for n, f in enumerate(as_completed(futs), 1):
+                        f.result()        # write_item reports its own errors
+                        done(n, futs[f])
         print(f"  per-file log: {logf}")
 
     write_report(items, report)

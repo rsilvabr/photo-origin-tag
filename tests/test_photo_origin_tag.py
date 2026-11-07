@@ -378,6 +378,37 @@ def test_a_killed_runs_temp_is_removed_and_never_taken_for_an_export(tmp_path):
 
 
 @real
+@pytest.mark.parametrize("workers,stay_open", [(2, True), (1, False)])
+def test_workers_and_spawn_mode_write_the_same(library, tmp_path, monkeypatch,
+                                                workers, stay_open):
+    base, e = library
+    monkeypatch.setattr(pot, "EXIFTOOL_STAY_OPEN", stay_open)
+    assert run(tmp_path / HOSTILE, "--apply", "--workers", workers) == 0
+    assert not pot._ALL_PROCS                  # every exiftool closed at the end
+    assert tags(e["raw"]) == ([], "Source: RAW")
+    assert tags(e["jpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
+    assert tags(e["tiff8"]) == (["jxlphoto-origin:tiff8"], "Source: TIFF 8-bit")
+    assert not list((tmp_path / HOSTILE).rglob(f"*{pot.TEMP_MARK}*"))
+    pot.close_exiftools()
+
+
+@real
+def test_a_dead_exiftool_is_replaced(tmp_path):
+    base = tmp_path / HOSTILE / "x"
+    touch(base / "a.JPG")
+    p = export_of(base, "a")
+    rc, so, se = pot.run_exiftool(["-j", "-IFD0:Model", str(p)])
+    assert rc == 0 and "NIKON Z f" in so
+    pot._thread_exiftool().p.kill()            # dies between two commands
+    pot._thread_exiftool().p.wait()
+    rc, so, se = pot.run_exiftool(["-j", "-IFD0:Model", str(p)])
+    assert rc == 0 and "NIKON Z f" in so       # a fresh process answered
+    rc, so, se = pot.run_exiftool(["-j", str(tmp_path / "missing.tif")])
+    assert rc == 1 and "Error" in se           # an error is still an error
+    pot.close_exiftools()
+
+
+@real
 def test_long_path(tmp_path):
     deep = tmp_path / HOSTILE
     while len(str(deep)) < 250:

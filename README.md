@@ -68,12 +68,38 @@ of reads plus writes, the drive's limit (v0.1.0, three exiftool processes per
 file: 87 s). `--workers 2` was slower on that disk (74 s), and reading 25 files
 ahead before writing them made no difference, so the default stays at one.
 Estimate for 1.07 TB of exports on that drive: about 3 hours. `presets_LOCAL\JXL 9 - ORIGEM + MASTERS + COPIAS.bat` runs the
-simulation, asks, tags, then SYNC PHOTOS, SRGB and JPG MOBILE.
+simulation, asks, tags, then SYNC PHOTOS, JPG ONLY, SRGB and JPG MOBILE.
 
 Refusals (never overwritten): a different `jxlphoto-origin` or a `Source:`
 comment the rules disagree with (an override replaces those), any other
 `XPComment` text (never), a TIFF carrying jxl-photo markers (a decoded master,
 not an export), a file that changed while it was being tagged.
+
+## What is still missing a TIFF: `pastas_exportar_tiff.py`
+
+The step before the tags: which camera folders still lack the TIFF export a
+master needs. It walks every `*EXPORT*` folder in `G:\2024-2026`, matches the
+exported JPGs to the TIFFs by photo (the name without profile, version or
+camera), and opens a checklist in the browser: each row a camera folder with
+something missing, in 6 categories, a click opens it in Explorer, the checks
+persist between scans.
+
+```
+py pastas_exportar_tiff.py            # scan + checklist page (Ctrl+C ends it)
+py pastas_exportar_tiff.py --no-web   # scan + the .md list only
+```
+
+Shortcut: `presets_LOCAL\EXPORT - FALTA TIFF.bat`. It only reads the disk.
+The list (`<YYMMDD>_pastas_para_exportar_tiff.md`) and the checks
+(`pastas_exportar_tiff.state.json`) land in `Logs\`.
+
+Photos whose TIFF can no longer be exported (the Capture One edit is lost)
+go in `<camera>\_EXPORT\JPG_only`, loose or in subfolders: they are listed
+apart, in section 7 ("accepted"), without a checkbox, and the same JPG
+anywhere else in the event no longer counts as missing. jxl-photo's
+"JPG ONLY" preset archives them losslessly into `_EXPORT\JXL_jpeg`. The
+origin tags are NOT written into them: the tagger reads TIFFs only, and
+tagging would rewrite the only copy of those photos.
 
 ## Tests
 

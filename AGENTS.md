@@ -31,6 +31,12 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   generation (`--on-regeneration`). SRGB already runs with `convert`; JPG
   MOBILE is the transcoder (no such guard).
 
+- (08/11) `pastas_exportar_tiff.py` lives here too (moved from jxl-photo's
+  gitignored `AI_tools/`): the "which exports still lack a TIFF" checklist.
+  Standard library only, reads the disk only; output + checks in `Logs\`.
+  `_EXPORT\JPG_only` = no TIFF possible, accepted (section 7); those JPEGs
+  are never origin-tagged (only copy; a jbrd JXL already says "from JPEG").
+
 ## Rules for changes
 - Settings live at the top of `photo_origin_tag.py`; never repeat them as
   literals.

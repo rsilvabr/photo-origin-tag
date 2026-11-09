@@ -12,6 +12,11 @@ What is written (see SPEC.md):
     where it differs from what jxl-photo's encoder would write by itself
     (tiff16). The encoder inherits a jxlphoto-origin already in its input.
 
+A JPEG export below _EXPORT\\JPG_only (no TIFF of it can be made) gets the
+XPComment and nothing else: no XMP, every other JPEG segment byte-identical.
+Once it has an archive in _EXPORT\\JXL_jpeg it is refused, because tagging it
+would make the JPEG differ from what that archive gives back.
+
 The default run is a simulation; --apply writes. A file is only rewritten
 through a temporary copy that exiftool writes next to it, which is checked
 (image bytes, ICC profile, every other tag unchanged) before it replaces the
@@ -37,6 +42,8 @@ from pathlib import Path
 # ============================================================================
 EXPORT_FOLDER = "_EXPORT"            # exports live below <base>\_EXPORT\...
 EXPORT_EXTS = (".tif", ".tiff")
+JPG_ONLY_FOLDER = "JPG_only"         # <base>\_EXPORT\JPG_only: JPEG exports (no TIFF possible)
+JPG_ARCHIVE_FOLDER = "JXL_jpeg"      # their lossless archives, mirroring the subfolders
 RAW_EXTS = (".nef", ".nrw", ".orf", ".cr2", ".cr3", ".crw", ".arw", ".srf",
             ".sr2", ".dng", ".raf", ".rw2", ".pef", ".srw", ".x3f", ".3fr",
             ".iiq", ".erf", ".kdc", ".dcr", ".mrw", ".mos")
@@ -94,7 +101,11 @@ REWRITE_VOLATILE = {
     "IFD0:ExifOffset", "IFD0:GPSInfo", "IFD0:XMP", "IFD0:IPTC-NAA",
     "ExifIFD:InteropOffset",
 }
-VERSION = "0.3.0"
+# In a JPEG, exiftool reports these as positions in the file, and they move when
+# the Exif segment grows. What they point to is checked: the thumbnail is a tag
+# of its own, and the images after the scan are in the JPEG fingerprint.
+JPEG_POSITION_TAGS = {"ThumbnailOffset", "MPImageStart"}
+VERSION = "0.4.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)
@@ -288,6 +299,27 @@ def export_base(path: Path):
     return Path(*parts[:idx[-1]])
 
 
+def _below_export(path: Path):
+    """The folder names between the last EXPORT_FOLDER and the file, or None."""
+    parts = path.parts
+    idx = [i for i, s in enumerate(parts[:-1])
+           if s.casefold() == EXPORT_FOLDER.casefold()]
+    return list(parts[idx[-1] + 1:-1]) if idx else None
+
+
+def is_jpg_only_export(path: Path) -> bool:
+    """A JPEG directly in, or in a subfolder of, <base>\\_EXPORT\\JPG_only."""
+    below = _below_export(path)
+    return (path.suffix.lower() in JPEG_EXTS and bool(below)
+            and below[0].casefold() == JPG_ONLY_FOLDER.casefold())
+
+
+def jpg_archive_path(path: Path) -> Path:
+    """Where the lossless archive of a JPG_only export lands."""
+    return (export_base(path) / EXPORT_FOLDER / JPG_ARCHIVE_FOLDER
+            / Path(*_below_export(path)[1:], path.stem + ".jxl"))
+
+
 def clean_stale_temps(roots):
     """Delete the temporary copies a killed run left behind. Only files named
     <stem><TEMP_MARK>-<pid><ext> whose original <stem><ext> still exists are
@@ -324,8 +356,8 @@ def find_exports(roots):
                 for fn in sorted(fns):
                     cands.append(Path(dp) / fn)
         for p in cands:
-            if (p.suffix.lower() in EXPORT_EXTS and TEMP_MARK not in p.name
-                    and export_base(p) is not None):
+            if (TEMP_MARK not in p.name and export_base(p) is not None
+                    and (p.suffix.lower() in EXPORT_EXTS or is_jpg_only_export(p))):
                 found.append(p)
     seen, uniq = set(), []
     for p in found:
@@ -427,14 +459,18 @@ def _depth_kind(bits):
     return None
 
 
-def classify(exts: dict, meta: dict, tiff_bits=None, override=None) -> Decision:
+def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
+             jpeg_export=False) -> Decision:
     """Decide one export.
 
-    exts:      {ext: filename} of the original(s) beside the export (the
-               longest-prefix sibling), {} when none was found.
-    meta:      the export's exiftool entry (-G1 keys).
-    tiff_bits: BitsPerSample of the original TIFF, when there is one.
-    override:  an Override, which wins over everything."""
+    exts:        {ext: filename} of the original(s) beside the export (the
+                 longest-prefix sibling), {} when none was found.
+    meta:        the export's exiftool entry (-G1 keys).
+    tiff_bits:   BitsPerSample of the original TIFF, when there is one.
+    override:    an Override, which wins over everything.
+    jpeg_export: the export is a JPEG, whose recipe may have dropped the RAW
+                 signal (Capture One's WEB recipe does), so a missing signal
+                 proves nothing without a Green label."""
     # sidecars (.xmp, ...) beside the original are not originals
     exts = {e: n for e, n in exts.items()
             if e in RAW_EXTS or e in JPEG_EXTS or e in TIFF_EXTS}
@@ -461,6 +497,9 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None) -> Decision:
                 return review("label Blue but no RAW signal in a NEF+JPEG pair")
             if label == LABEL_NOT_RAW and kind == "raw":
                 return review("label Green but the export carries a RAW signal")
+            if jpeg_export and not signal and label != LABEL_NOT_RAW:
+                return review("NEF+JPEG pair, JPEG export without a RAW signal "
+                              "or a Green label (its recipe may drop metadata)")
             return Decision(kind, "NEF+JPEG pair, RAW signal" if signal
                             else "NEF+JPEG pair, no RAW signal", original=names)
         if label == LABEL_RAW:
@@ -589,15 +628,17 @@ def plan_item(it: Item, meta: dict, overridden: bool):
     if d.kind is None:
         it.action, it.reason = "review", d.review
         return
+    jpeg_export = is_jpg_only_export(it.path)
     rel = _as_list(meta.get("XMP-dc:Relation"))
+    # a JPEG is never given a token, so any token in one came from jxl-photo
     tokens_other = [t for t in rel if t.startswith(TOOLKIT_NAMESPACE)
-                    and not t.startswith(ORIGIN_PREFIX)]
+                    and (jpeg_export or not t.startswith(ORIGIN_PREFIX))]
     if tokens_other:
         it.action = "skip"
         it.reason = (f"carries jxl-photo marker(s) {tokens_other[:2]}: "
                      f"not a Capture One export")
         return
-    want_tok = ORIGIN_TOKENS[d.kind]
+    want_tok = None if jpeg_export else ORIGIN_TOKENS[d.kind]
     want_full = ORIGIN_PREFIX + want_tok if want_tok else None
     have = [t for t in rel if t.startswith(ORIGIN_PREFIX)]
     # what jxl-photo would record when no token is written: tiff16
@@ -638,6 +679,10 @@ def plan_item(it: Item, meta: dict, overridden: bool):
         it.comment = want_c
     if it.comment is None and it.relation_add is None and not it.relation_remove:
         it.action, it.reason = "ok", "already tagged"
+    elif jpeg_export and jpg_archive_path(it.path).exists():
+        it.action = "refuse"
+        it.reason = (f"already archived in {JPG_ARCHIVE_FOLDER}: tagging would "
+                     f"make the JPEG differ from what its JXL gives back")
     else:
         it.action = "write"
 
@@ -667,6 +712,37 @@ def image_fingerprint(path: Path):
     return h_img.hexdigest(), h_icc.hexdigest()
 
 
+def jpeg_fingerprint(path: Path):
+    """(sha256 of everything but the Exif segment, sha256 of the ICC segments):
+    the XPComment lives in the Exif segment, so every other byte of the file,
+    from the XMP to the scan and any trailer, has to come through unchanged."""
+    d = Path(path).read_bytes()
+    if d[:2] != b"\xff\xd8":
+        raise OSError("not a JPEG (no SOI marker)")
+    h_all, h_icc = hashlib.sha256(d[:2]), hashlib.sha256()
+    i = 2
+    while True:
+        if i + 4 > len(d) or d[i] != 0xFF:
+            raise OSError(f"malformed JPEG segment at byte {i}")
+        marker = d[i + 1]
+        if marker == 0xFF:                # fill byte before a marker
+            h_all.update(d[i:i + 1])
+            i += 1
+            continue
+        if marker == 0xDA:                # start of scan: the rest, whole
+            h_all.update(d[i:])
+            return h_all.hexdigest(), h_icc.hexdigest()
+        end = i + 2 + int.from_bytes(d[i + 2:i + 4], "big")
+        if end > len(d):
+            raise OSError(f"truncated JPEG segment at byte {i}")
+        seg = d[i:end]
+        if not (marker == 0xE1 and seg[4:10] == b"Exif\0\0"):
+            h_all.update(seg)
+        if marker == 0xE2 and seg[4:16] == b"ICC_PROFILE\0":
+            h_icc.update(seg)
+        i = end
+
+
 def all_tags(path: Path):
     rc, so, se = run_exiftool(["-j", "-G1", "-a", "-n", "-b",
                                "--File:all", "--System:all",
@@ -691,9 +767,10 @@ def write_item(it: Item):
     'written' or 'error'."""
     src = it.path
     tmp = src.with_name(f"{src.stem}{TEMP_MARK}-{os.getpid()}{src.suffix}")
+    fingerprint = jpeg_fingerprint if src.suffix.lower() in JPEG_EXTS else image_fingerprint
     try:
         st0 = src.stat()
-        fp0 = image_fingerprint(src)
+        fp0 = fingerprint(src)
         tags0 = all_tags(src)
         args = ["-o", str(tmp)]
         for t in it.relation_remove:
@@ -706,11 +783,14 @@ def write_item(it: Item):
         rc, so, se = run_exiftool(args)
         if rc != 0 or not tmp.exists():
             raise OSError(f"exiftool failed: {(se or so).strip()[:300]}")
-        if image_fingerprint(tmp) != fp0:
+        if fingerprint(tmp) != fp0:
             raise OSError("image data or ICC profile changed in the rewrite")
         tags1 = all_tags(tmp)
-        diff = tag_differences(tags0, tags1, REWRITE_VOLATILE
-                               | {"XMP-dc:Relation", "IFD0:XPComment"})
+        allowed = REWRITE_VOLATILE | {"XMP-dc:Relation", "IFD0:XPComment"}
+        if fingerprint is jpeg_fingerprint:
+            allowed |= {k for k in {*tags0, *tags1}
+                        if k.rsplit(":", 1)[-1] in JPEG_POSITION_TAGS}
+        diff = tag_differences(tags0, tags1, allowed)
         if diff:
             raise OSError(f"unexpected tag change(s): {', '.join(diff[:6])}")
         rel1 = _as_list(tags1.get("XMP-dc:Relation"))
@@ -801,7 +881,7 @@ def build_items(exports, overrides):
         if tpath is not None:
             e = orig_meta.get(_key(tpath))
             tb = e.get("IFD0:BitsPerSample") if e else None
-        it.decision = classify(exts, m, tb, ov)
+        it.decision = classify(exts, m, tb, ov, is_jpg_only_export(it.path))
         src = source_file(it.decision.kind, exts) if PROFILE_IN_COMMENT else None
         decided.append((it, m, ov, export_base(it.path) / src if src else None))
     # the profile of the JPEG originals the rules picked (read only for those)

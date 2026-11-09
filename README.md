@@ -97,9 +97,24 @@ Photos whose TIFF can no longer be exported (the Capture One edit is lost)
 go in `<camera>\_EXPORT\JPG_only`, loose or in subfolders: they are listed
 apart, in section 7 ("accepted"), without a checkbox, and the same JPG
 anywhere else in the event no longer counts as missing. jxl-photo's
-"JPG ONLY" preset archives them losslessly into `_EXPORT\JXL_jpeg`. The
-origin tags are NOT written into them: the tagger reads TIFFs only, and
-tagging would rewrite the only copy of those photos.
+"JPG ONLY" preset archives them losslessly into `_EXPORT\JXL_jpeg`. Tag them
+BEFORE that (next section).
+
+## JPEG exports in `_EXPORT\JPG_only`
+
+The same run also finds these JPEGs and writes the `XPComment` into them, and
+nothing else: no `jxlphoto-origin`, no XMP. jxl-photo's lossless archive
+carries the comment and still gives the tagged JPEG back bit for bit.
+
+- Every byte outside the Exif segment (XMP, ICC, tables, the image, anything
+  after it) is checked unchanged before the temporary copy replaces the JPEG.
+- A JPEG that already has an archive in `_EXPORT\JXL_jpeg` is refused: tagging
+  it would make it differ from what that archive gives back.
+- A JPEG carrying any `jxlphoto-*` marker is skipped (jxl-photo wrote it).
+- NEF+JPEG pair: a JPEG export without the RAW signal needs a Green label to
+  count as JPEG. Capture One's WEB recipe drops `XMP-crd` and sometimes all the
+  EXIF, so a missing signal proves nothing there: without the label it goes to
+  review and stays without a comment (`overrides.csv` settles it).
 
 ## Tests
 

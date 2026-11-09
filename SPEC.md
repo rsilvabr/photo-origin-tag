@@ -105,6 +105,20 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
   comparada com a varredura de 07/11 (2024: 532 jpeg; 2025: 1270 jpeg + 7
   tiff8; 2026: 181 jpeg).
 
+## 7. JPEGs de `_EXPORT\JPG_only` (09/11/2026, v0.4.0)
+
+Fotos sem TIFF possível. Só o `XPComment`, sem XMP e sem `jxlphoto-origin`.
+
+- Tem que rodar ANTES do preset JPG ONLY: depois do archive, o JPEG é recusado,
+  porque mudaria em relação ao que o JXL devolve.
+- A escrita confere que todo byte fora do segmento Exif continua igual.
+- Par NEF+JPG: sem sinal de RAW, só vale como JPEG com label verde. O recipe WEB
+  do C1 tira o `XMP-crd` e às vezes todo o EXIF (medido em 09/11: 70 cópias WEB
+  da Zf davam "JPEG" com as mesmas fotos em AdobeRGB dando RAW). Sem o label vai
+  para revisão.
+- Conferido em cópias dos 346 JPEGs reais (09/11): 214 marcados, 214 voltam bit
+  a bit pelo transcoder do jxl-photo, com o comentário no JXL.
+
 ## Em aberto
 
 - Texto do comentário: DECIDIDO em inglês (`Source: JPEG`), 07/11.

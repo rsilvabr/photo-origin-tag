@@ -9,8 +9,8 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   guessed". jxl-photo needs no change: its encoder inherits a
   `jxlphoto-origin` already in the TIFF (`_origin_for_output`, test `test_r2a`)
   and copies the EXIF `XPComment` into the master's Exif box.
-- Write ONLY the TIFF exports, then rebuild the masters and the copies. Never
-  edit existing masters.
+- Write the TIFF exports (and, since 09/11, the JPG_only JPEGs), then rebuild
+  the masters and the copies. Never edit existing masters.
 - Comment text in English: `Source: RAW` / `JPEG` / `TIFF 8-bit` / `TIFF 16-bit`.
 - (08/11) The comment also names the ORIGINAL's colour profile for JPEG/TIFF
   originals (`Source: JPEG, Adobe RGB (1998)`): the ICC description, else the
@@ -34,8 +34,14 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
 - (08/11) `pastas_exportar_tiff.py` lives here too (moved from jxl-photo's
   gitignored `AI_tools/`): the "which exports still lack a TIFF" checklist.
   Standard library only, reads the disk only; output + checks in `Logs\`.
-  `_EXPORT\JPG_only` = no TIFF possible, accepted (section 7); those JPEGs
-  are never origin-tagged (only copy; a jbrd JXL already says "from JPEG").
+  `_EXPORT\JPG_only` = no TIFF possible, accepted (section 7).
+- (09/11) JPEGs below `_EXPORT\JPG_only` get the XPComment only, never XMP or
+  a `jxlphoto-*` token, and only BEFORE their archive exists in
+  `_EXPORT\JXL_jpeg` (`jpg_archive_path`; tagging later would break the match
+  with what the archive gives back). `write_item` checks every byte outside
+  the Exif segment (`jpeg_fingerprint`). A missing RAW signal proves nothing
+  in a JPEG export (the WEB recipe drops `XMP-crd`): a NEF+JPEG pair without
+  it needs a Green label, else review.
 
 ## Rules for changes
 - Settings live at the top of `photo_origin_tag.py`; never repeat them as
@@ -68,6 +74,15 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   in overrides.csv as comments). Applied to 20 real copies (every rule/year):
   pixels, ICC and Deflate unchanged; only XPComment, dc:Relation,
   XMPToolkit and strip offsets differ; jxl-photo's master inherits both tags.
-- NOT yet applied to G:. The owner runs `presets_LOCAL\JXL 9 - ORIGEM +
-  MASTERS + COPIAS.bat` after a backup (~1 TB of exports to rewrite, ~3 h,
-  then the master/copy re-encodes).
+- Applied to the TIFFs of G:\2024-2026 on 08-09/11 (exit 0). v0.4.0 (JPG_only
+  JPEGs, 63 tests) applied to G:'s 9 JPG_only folders on 09/11, before any
+  archive existed: 346 JPEGs → 214 tagged (raw 162, jpeg 50, tiff16 2), 132
+  left for review; an independent hash found no byte changed outside Exif.
+
+## Pending list
+The owner keeps one list of everything still pending, across all repos, in
+`../PENDENCIAS.md` (the folder above this repo, outside git, in Portuguese).
+Read it when asked what is left to do. When work here finishes an item, leaves
+something for later, or waits on a decision from the owner, update that file in
+the same session: remove what is done, add what is new. It is private: never
+copy its contents into tracked files, commits or release notes.

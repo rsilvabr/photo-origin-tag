@@ -53,9 +53,13 @@ EXPORT_FAMILIES = ("C1_Export_",)
 # pastas onde nunca procurar *EXPORT*
 SKIP_DIRS = ("CaptureOne", "NKSC_PARAM", "tiff_zip")
 # palavras do nome que não identificam a foto (perfil, versão, câmera)
-NOISE_TOKEN = re.compile(
+NOISE_WORD = re.compile(
     r"^(prophoto.*|adobe ?rgb.*|srgb.*|display ?p3.*|p3|rec2020.*|elle.*|"
-    r"v\d+|web|check|.* .*|[a-z]{1,2}\d{3,4})$", re.I)   # último: câmera (E4500, D810)
+    r"v\d+|web|check)$", re.I)
+# genéricas (tem espaço; parece câmera, E4500/D810): só cortam quando o que já
+# ficou tem um dígito, senão cortariam o próprio número da foto
+# ("DSC_1234 1" -> "dsc"; "IMG_E1234" -> "img")
+NOISE_GENERIC = re.compile(r"^(.* .*|[a-z]{1,2}\d{3,4})$", re.I)
 PORT = 8765
 SHOW_NAMES = 15          # quantos nomes mostrar por diferença
 LOG_DIR = "Logs"         # ao lado deste script; env PHOTO_ORIGIN_TAG_LOG_DIR
@@ -79,18 +83,28 @@ CATEGORIES = {
 ACCEPTED_CAT = 7
 
 
+class RootNotFound(Exception):
+    """None of the YEARS folders exists in ROOT (drive not connected?)."""
+
+
 def photo_key(filename):
     """Radical do nome: tudo antes do primeiro perfil/versão/WEB/CHECK/câmera.
     DSC_3000_v1_CHECK_1 -> dsc_3000; DSC_0566_NXstudio_AdobeRGB_v1 ->
     dsc_0566_nxstudio. O 1º pedaço é sempre o nome (pode ter espaço:
-    "P1010076 (2)", "WhatsApp Image ...")."""
+    "P1010076 (2)", "WhatsApp Image ..."). Um pedaço "genérico" (com espaço,
+    ou com cara de câmera) só corta depois de o nome já ter um dígito."""
     first, *rest = os.path.splitext(filename)[0].lower().lstrip("_").split("_")
     keep = [first]
     for t in rest:
+        if NOISE_WORD.match(t):
+            break
         # "0002 (2)" is the frame number + Windows' duplicate counter, part of
         # the name -- the "has a space" noise rule would cut every
-        # DSC_xxxx (n) down to "dsc" and let one TIFF cover them all
-        if NOISE_TOKEN.match(t) and not DUP_COUNTER.match(t):
+        # DSC_xxxx (n) down to "dsc" and let one TIFF cover them all. For the
+        # same reason a generic token never cuts while the name so far has no
+        # digit: "DSC_1234 1" and "IMG_E1234" would collapse to "dsc"/"img"
+        if (NOISE_GENERIC.match(t) and not DUP_COUNTER.match(t)
+                and any(c.isdigit() for c in "".join(keep))):
             break
         keep.append(t)
     return "_".join(t for t in keep if t)
@@ -146,10 +160,17 @@ def scan():
             print(f"\r  varrendo... {count[0]} pastas, {time.time() - t0:.0f} s", end="", flush=True)
 
     exports = []
+    found_year = False
     for y in YEARS:
         yd = os.path.join(ROOT, y)
         if os.path.isdir(yd):
+            found_year = True
             exports += find_exports(yd, progress)
+    if not found_year:
+        # an empty scan would say "0 folders missing something" and overwrite
+        # the day's list: a disk that is not there is an error, not a clean bill
+        raise RootNotFound(f"none of the year folders {', '.join(YEARS)} exists "
+                           f"in {ROOT} (is the drive connected?)")
     print(f"\r  {count[0]} pastas, {len(exports)} *EXPORT*; lendo cada uma...", flush=True)
 
     # Folders of one export FAMILY (Capture One writes one folder per recipe:
@@ -405,7 +426,9 @@ document.addEventListener('change', e => {
 });
 document.addEventListener('click', async e => {
   if (e.target.id === 'rescan') { toast('Varrendo o disco…', 600000); e.target.disabled = true;
-    try { await fetch('/rescan', {method: 'POST'}); location.reload(); }
+    try { const r = await fetch('/rescan', {method: 'POST'});
+      if (r.ok) { location.reload(); }
+      else { toast('Disco não encontrado'); e.target.disabled = false; } }
     catch (_) { toast('O script não está rodando'); e.target.disabled = false; } return; }
   const a = e.target.closest('a.p'); if (!a) return; e.preventDefault();
   try { const r = await fetch('/open', {method: 'POST', body: JSON.stringify({path: a.dataset.open})});
@@ -458,6 +481,27 @@ def render(rows, state):
                 .replace("__STATE__", json.dumps(state).replace("</", "<\\/")))
 
 
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
+
+
+def request_allowed(host, origin):
+    """Only this machine's own page may POST: Host must be 127.0.0.1:PORT or
+    localhost:PORT, and an Origin, if the browser sent one, must be http:// +
+    one of those (a page from another site gets 403)."""
+    ok = {f"{h}:{PORT}" for h in LOCAL_HOSTS}
+    if host is None or host.lower() not in ok:
+        return False
+    if origin is None:
+        return True
+    return origin.lower() in {f"http://{h}" for h in ok}
+
+
+class Server(ThreadingHTTPServer):
+    # HTTPServer sets this to True; on Windows that lets a second instance
+    # open the same port and the page then shows the data of either one
+    allow_reuse_address = False
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -481,6 +525,14 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, "text/html; charset=utf-8")
 
     def do_POST(self):
+        if not request_allowed(self.headers.get("Host"), self.headers.get("Origin")):
+            return self._send(403)
+        try:
+            self._post()
+        except ValueError:       # bad Content-Length / not UTF-8 / not JSON
+            self._send(400)
+
+    def _post(self):
         if self.path == "/state":
             data = self._json()
             if not isinstance(data, dict):
@@ -491,10 +543,16 @@ class Handler(BaseHTTPRequestHandler):
             os.replace(tmp, state)
             return self._send(204)
         if self.path == "/rescan":
-            rescan()
+            try:
+                rescan()
+            except RootNotFound:
+                return self._send(503)       # the previous rows stay on the page
             return self._send(204)
         if self.path == "/open":
-            wanted = (self._json() or {}).get("path") or ""
+            body = self._json()
+            if not isinstance(body, dict):
+                return self._send(400)
+            wanted = body.get("path") or ""
             # only folders shown on the page, never an arbitrary path
             if os.path.normcase(wanted) in _allowed and os.path.isdir(wanted):
                 os.startfile(wanted)
@@ -504,18 +562,35 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    rescan()
-    if "--no-web" in sys.argv:
-        return 0
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    url = f"http://127.0.0.1:{PORT}/"
-    print(f"Checklist em {url}  (Ctrl+C encerra)")
-    threading.Timer(0.5, webbrowser.open, (url,)).start()
+    web = "--no-web" not in sys.argv
+    server = None
+    if web:
+        # the port first: a second instance must fail here, not after a scan
+        try:
+            server = Server(("127.0.0.1", PORT), Handler)
+        except OSError as e:
+            print(f"ERROR: port {PORT} in use (is the checklist already open?) [{e}]",
+                  file=sys.stderr)
+            return 2
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    return 0
+        try:
+            rescan()
+        except RootNotFound as e:
+            print(f"\nERROR: {e}", file=sys.stderr)
+            return 2
+        if not web:
+            return 0
+        url = f"http://127.0.0.1:{PORT}/"
+        print(f"Checklist em {url}  (Ctrl+C encerra)")
+        threading.Timer(0.5, webbrowser.open, (url,)).start()
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        return 0
+    finally:
+        if server:
+            server.server_close()
 
 
 if __name__ == "__main__":

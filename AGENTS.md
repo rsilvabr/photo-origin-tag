@@ -43,11 +43,36 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   in a JPEG export (the WEB recipe drops `XMP-crd`): a NEF+JPEG pair without
   it needs a Green label, else review.
 
+## Decisions taken (11/11/2026, v0.5.0, after the Fable audit)
+- A path with `%`: Python copies the file and exiftool edits the copy in place
+  (`-overwrite_original`); without `%` it stays `-o`, the measured route of
+  every real file. `%%` is no escape in exiftool 13.59, and `-o %d%f...%e`
+  breaks on a folder like `a%c`. See `write_item`.
+- A NEF+JPEG pair without the RAW signal counts as JPEG only with a Green
+  label, in TIFF exports too (the 752 real cases all have it). No new colour.
+- `XMP-crd` does not come only from the NEF: NX Studio's JPEG has it (14 real
+  cases). If the JPEG beside carries the signal, the export's signal proves
+  nothing and the label decides (`jpeg_has_signal`, `_jpegs_with_signal`).
+- Exit codes: 0 ok, 1 a file errored, 2 usage/config, 3 aborted (the report is
+  written anyway). `UsageError` is the way to exit 2.
+- Roots become absolute with `os.path.abspath`, NOT `Path.resolve()` (it
+  follows junctions and swaps a mapped letter for UNC; the overrides' `G:\...`
+  would stop matching).
+- A comment that is not exactly one of this script's is someone else's, even
+  if it starts with `Source: `: refused always, override or not.
+- The 132 JPEGs of `JPG_only` in review stay without a comment (they were all
+  archived on 10/11). The RAW+JPEG+TIFF trio keeps going to review (plan item
+  A11 was not approved).
+
 ## Rules for changes
 - Settings live at the top of `photo_origin_tag.py`; never repeat them as
   literals.
 - exiftool only through `run_exiftool` (UTF-8 argfile, WindowsLongPath).
-- Every file test uses a hostile path (Japanese + `[ ]` + space + `%`).
+- Every file test uses a hostile path (Japanese + `[ ]` + space + `%`). The
+  `library` and `base` fixtures run twice, on `HOSTILE` and on
+  `HOSTILE_NO_PERCENT` (the same without the `%`): a path with `%` takes the
+  copy route of `write_item`, one without it takes `-o`, and the second is
+  the route of every real file.
 - A write goes through `write_item`: exiftool `-o` temp copy in the same
   folder → image bytes + ICC + every other tag checked → unchanged-since check
   → `os.replace`. Anything that differs is an error; the original stays.
@@ -62,6 +87,19 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   87 s, v0.2.0 66 s; `--workers 2` 74 s; reading 25 files ahead (tried and
   removed) 66 s = no gain. The run moves ~205 MB/s = the HDD's limit. Do not
   add staging/batching/parallelism for one HDD without a new measurement.
+
+## State (11/11/2026)
+- v0.5.0 (audit fixes, Parts A and B of
+  `AI_tools/261111_Fable_plan_audit-fixes.md`): 136 tests (63 before). The
+  audit, the plan and the coder's reports are in `AI_tools/`. Reviewed on
+  11/11 with a simulation on G:\2024-2026 (read only): 8774 exports, 0 `write`,
+  0 `error`; every one of the 8428 TIFF rows has the action and origin of the
+  08/11 report, the 346 `JPG_only` JPEGs are 214 `ok` + 132 `review`. Nothing
+  was written to G: by this work. Not decided: the RAW+JPEG+TIFF trio with a
+  Blue label (18 of the 24 TIFFs in review, S5Pro `DSCF`): rule A11 was left
+  out.
+- Since 10/11 all 346 JPEGs of `JPG_only` have their archive in `JXL_jpeg`
+  (214 with the comment, 132 in review and now refused as "already archived").
 
 ## State (08/11/2026)
 - v0.3.0: the original's colour profile in the comment, 36 tests. Simulation

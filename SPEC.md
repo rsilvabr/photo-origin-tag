@@ -1,4 +1,4 @@
-# photo-origin-tag: especificação (rascunho 1, 07/11/2026)
+# photo-origin-tag: especificação (07/11/2026; atualizada em 11/11/2026, v0.5.0)
 
 Carimba nos TIFFs exportados pelo Capture One **de onde a foto veio**
 (RAW, JPEG, TIFF 8-bit ou TIFF 16-bit), antes do jxl-photo transformá-los em
@@ -32,8 +32,12 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
 
 ## 2. Regra de detecção (por export)
 
-1. Só entra arquivo `.tif/.tiff` dentro de `<base>\_EXPORT\...`. O original é
-   procurado em `<base>`. Os nomes das pastas são constantes no topo do script.
+1. Entra arquivo `.tif/.tiff` dentro de `<base>\_EXPORT\...` e, desde a v0.4.0,
+   JPEG dentro de `<base>\_EXPORT\JPG_only\...` (§7). O original é procurado em
+   `<base>`. Os nomes das pastas são constantes no topo do script. As raízes
+   passadas na linha de comando viram caminho absoluto (`os.path.abspath`, não
+   `resolve()`, que segue junctions e troca a letra do disco por UNC, e os
+   caminhos do `overrides.csv` deixariam de casar).
 2. **O original ao lado decide:** o arquivo de `<base>` cujo nome é o MAIOR
    prefixo do nome do export (`DSC_1211_NXstudio_ProPhoto-g22_v1.tif` →
    `DSC_1211_NXstudio.*`).
@@ -41,8 +45,17 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
    - só JPEG → JPEG
    - só TIFF → lê a profundidade do TIFF original (`tiff8` ou `tiff16`)
 3. **Par RAW+JPEG da câmera:**
-   - NEF: `XMP-crd` ou `ExifIFD:SubjectDistance` no export → RAW, senão JPEG
-     (validado: 100% de acordo com os labels em 2024).
+   - NEF: `XMP-crd` ou `ExifIFD:SubjectDistance` no export → RAW (validado:
+     100% de acordo com os labels em 2024). **Sem o sinal só vale como JPEG
+     com label verde**, em TIFF e em JPEG (decidido em 11/11: a falta de sinal
+     não prova nada, o recipe WEB do C1 o tira); sem o verde vai para revisão.
+     Nos dados reais os 752 casos tinham verde.
+   - O sinal não vem só do NEF: o JPEG que o NX Studio faz do NEF herda o
+     `XMP-crd` (14 casos reais) e o C1 o copia para o export. Por isso, quando
+     o export tem o sinal, sem override e sem label azul, lê-se também o JPEG
+     ao lado: se ele carrega o sinal, o sinal do export não vale e decide o
+     label (verde = JPEG; qualquer outro = revisão). JPEG ilegível conta como
+     sem o sinal.
    - Outra marca (Fuji RAF, ...): não há sinal na máquina → decide o label do
      C1 (azul = RAW, verde = JPEG). O relatório marca "decidido pelo label".
 4. **Par RAW+TIFF (Olympus: ORF + TIF do OM Workspace):** decide o label
@@ -59,8 +72,9 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
   export do C1) → pula.
 - O TIFF já tem a MESMA origem → nada a fazer (idempotente).
 - O TIFF já tem OUTRA origem → recusa. Só um override troca.
-- O `XPComment` já tem um texto que não é deste script → recusa o arquivo
-  (nunca apaga um comentário do dono).
+- O `XPComment` já tem um texto que não é exatamente um comentário deste
+  script → recusa o arquivo, com ou sem override (nunca apaga um comentário do
+  dono, nem um que comece com `Source: `).
 - O `XPComment` deste script com o MESMO tipo e outro perfil (ou sem perfil,
   da v0.2) → reescreve sem override: o perfil é lido do original, não é regra.
 - Arquivo modificado entre a leitura e a escrita, travado ou em uso → recusa.
@@ -74,8 +88,26 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
   - hash dos bytes da imagem (strips/tiles lidos sem descomprimir) → idêntico;
   - perfil ICC (bytes) → idêntico;
   - todas as tags (`exiftool -j -G1 -a`) → idênticas, exceto as duas escritas.
-  Se algo diferir, restaura o original (backup temporário na mesma pasta) e
-  marca ERRO.
+  Se algo diferir, o original fica como estava e o arquivo é marcado ERRO.
+- Não há backup nem restauração: o exiftool escreve uma **cópia temporária**
+  na mesma pasta (`<nome>~origin-tag-tmp-<pid><ext>`), a cópia é conferida
+  (bytes da imagem, ICC e todas as outras tags), confere-se que o original não
+  mudou desde a leitura, e só então `os.replace` troca o original pela cópia.
+- Caminho com `%`: o `-o` do exiftool lê `%d %f %e %c` (com modificadores) no
+  nome de saída como códigos de formato, e `%%` não é escape (exiftool 13.59):
+  o arquivo dá erro e sobra uma cópia numa árvore de pastas nova. Para esses
+  caminhos o Python faz a cópia e o exiftool a edita no lugar
+  (`-overwrite_original`; o temporário do próprio exiftool,
+  `<cópia>_exiftool_tmp`, também é limpo). Sem `%` segue o `-o`, o caminho de
+  todos os arquivos reais.
+- Códigos de saída: 0 = ok; 1 = algum arquivo deu erro e ficou como estava;
+  2 = uso/configuração (raiz inexistente, `overrides.csv` inválido,
+  `--workers`, falta `tifffile`); 3 = execução abortada (exceção, Ctrl+C).
+  O relatório CSV é gravado sempre que o planejamento terminou, inclusive nos
+  abortos (o que não foi alcançado fica `write`, motivo `not attempted`).
+  A tarefa agendada (se um dia existir) deve parar em 2 ou mais.
+- Um export que o exiftool não consegue ler como o tipo da extensão (vazio,
+  1 byte, JPEG com extensão `.tif`) é `error` já na simulação.
 - Relatório CSV + log por execução: cada arquivo com origem, como foi
   decidido, ação (carimbado / já estava / recusado / revisar) e motivo.
 - Progresso na tela (N/total, tempo restante) nas fases longas.
@@ -112,7 +144,13 @@ Fotos sem TIFF possível. Só o `XPComment`, sem XMP e sem `jxlphoto-origin`.
 - Tem que rodar ANTES do preset JPG ONLY: depois do archive, o JPEG é recusado,
   porque mudaria em relação ao que o JXL devolve.
 - A escrita confere que todo byte fora do segmento Exif continua igual.
-- Par NEF+JPG: sem sinal de RAW, só vale como JPEG com label verde. O recipe WEB
+- JPEG sem nenhum Exif (o recipe WEB às vezes tira tudo): o exiftool cria o
+  IFD0 com `XResolution`, `YResolution`, `ResolutionUnit` e
+  `YCbCrPositioning`; só nesse caso essas quatro tags novas são aceitas pela
+  conferência. Em JPEG que já tem Exif, mudar qualquer uma delas continua
+  sendo erro.
+- Par NEF+JPG: sem sinal de RAW, só vale como JPEG com label verde (desde a
+  v0.5.0 vale também para TIFF, §2.3). O recipe WEB
   do C1 tira o `XMP-crd` e às vezes todo o EXIF (medido em 09/11: 70 cópias WEB
   da Zf davam "JPEG" com as mesmas fotos em AdobeRGB dando RAW). Sem o label vai
   para revisão.

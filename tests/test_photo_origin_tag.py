@@ -20,6 +20,16 @@ import photo_origin_tag as pot  # noqa: E402
 HAVE_EXIFTOOL = shutil.which("exiftool") is not None
 real = pytest.mark.skipif(not HAVE_EXIFTOOL, reason="needs exiftool")
 HOSTILE = "写真フォルダ_テスト [FINAL] 5% off"
+# The same without the %: a path with a % goes through the copy-then-edit-in-
+# place route of write_item, one without it through exiftool's -o (the route of
+# every real file). The fixtures run both.
+HOSTILE_NO_PERCENT = "写真フォルダ_テスト [FINAL] 5 off"
+
+
+@pytest.fixture(params=[HOSTILE, HOSTILE_NO_PERCENT], ids=["percent", "no-percent"])
+def hostile(request):
+    """The name of the hostile top folder, with and without a %."""
+    return request.param
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +141,7 @@ def test_nef_jpeg_pair_is_decided_by_the_machine_signal():
     assert C([".nef", ".jpg"], "Blue", signal=True).kind == "raw"
     assert C([".nef", ".jpg"], "Green").kind == "jpeg"
     assert C([".nef", ".jpg"], "Pink", signal=True).kind == "raw"   # rejected label
-    assert C([".nef", ".jpg"], "", signal=False).kind == "jpeg"
+    assert C([".nef", ".jpg"], "", signal=False).kind is None   # no label, no signal
     crd = pot.classify({".nef": "a", ".jpg": "b"},
                        {"XMP-xmp:Label": "Blue", "XMP-crd:CameraProfile": "x"})
     assert crd.kind == "raw"
@@ -202,15 +212,15 @@ def test_override_most_specific_match(tmp_path):
 def test_override_rejects_an_unknown_origin(tmp_path):
     f = tmp_path / "ov.csv"
     f.write_text("path,origin\nC:\\x,png\n", encoding="utf-8")
-    with pytest.raises(SystemExit):
+    with pytest.raises(pot.UsageError):
         pot.load_overrides(f)
 
 
 # ---------------------------------------------------------------- real files
 @pytest.fixture
-def library(tmp_path):
+def library(tmp_path, hostile):
     """A hostile camera folder with one export per rule."""
-    base = tmp_path / HOSTILE / "01_Zf"
+    base = tmp_path / hostile / "01_Zf"
     for s in ("DSC_0001", "DSC_0002"):
         touch(base / f"{s}.NEF"); touch(base / f"{s}.JPG")
     touch(base / "DSC_0003.JPG")
@@ -235,7 +245,7 @@ def library(tmp_path):
 def test_simulation_writes_nothing(library, tmp_path):
     base, e = library
     before = {k: p.read_bytes() for k, p in e.items()}
-    assert run(tmp_path / HOSTILE) == 0
+    assert run(base.parent) == 0
     assert all(e[k].read_bytes() == b for k, b in before.items())
     rows = report_rows(tmp_path)
     assert rows[e["raw"].name]["origin"] == "raw"
@@ -246,7 +256,7 @@ def test_simulation_writes_nothing(library, tmp_path):
 @real
 def test_apply_writes_the_right_tags(library, tmp_path):
     base, e = library
-    assert run(tmp_path / HOSTILE, "--apply") == 0
+    assert run(base.parent, "--apply") == 0
     assert tags(e["raw"]) == ([], "Source: RAW")
     assert tags(e["pairjpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
     assert tags(e["jpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
@@ -255,7 +265,7 @@ def test_apply_writes_the_right_tags(library, tmp_path):
                                 "Source: TIFF 8-bit, no color profile")
     assert tags(e["contra"]) == ([], None)
     assert tags(e["orphan"]) == ([], None)
-    assert not list((tmp_path / HOSTILE).rglob(f"*{pot.TEMP_MARK}*"))
+    assert not list(base.parent.rglob(f"*{pot.TEMP_MARK}*"))
     rows = report_rows(tmp_path)
     assert rows[e["contra"].name]["action"] == "review"
     assert rows[e["jpeg"].name]["action"] == "written"
@@ -267,7 +277,7 @@ def test_apply_keeps_image_bytes_icc_and_other_tags(library, tmp_path):
     set_tags(e["jpeg"], "-XMP-dc:Rights=Owner", "-ExifIFD:LensModel=NIKKOR Z 40mm")
     fp0 = pot.image_fingerprint(e["jpeg"])
     t0 = pot.all_tags(e["jpeg"])
-    assert run(tmp_path / HOSTILE, "--apply") == 0
+    assert run(base.parent, "--apply") == 0
     assert pot.image_fingerprint(e["jpeg"]) == fp0
     t1 = pot.all_tags(e["jpeg"])
     assert t1["XMP-dc:Rights"] == "Owner"
@@ -279,9 +289,9 @@ def test_apply_keeps_image_bytes_icc_and_other_tags(library, tmp_path):
 @real
 def test_second_run_is_a_no_op(library, tmp_path):
     base, e = library
-    assert run(tmp_path / HOSTILE, "--apply") == 0
+    assert run(base.parent, "--apply") == 0
     m = {k: (p.stat().st_mtime_ns, p.read_bytes()) for k, p in e.items()}
-    assert run(tmp_path / HOSTILE, "--apply") == 0
+    assert run(base.parent, "--apply") == 0
     assert {k: (p.stat().st_mtime_ns, p.read_bytes()) for k, p in e.items()} == m
     rows = report_rows(tmp_path)
     assert rows[e["jpeg"].name]["action"] == "ok"
@@ -356,8 +366,8 @@ def test_skips_a_tiff_jxl_photo_wrote(tmp_path):
 
 
 @real
-def test_a_failed_verification_leaves_the_original(tmp_path, monkeypatch):
-    base = tmp_path / HOSTILE / "x"
+def test_a_failed_verification_leaves_the_original(tmp_path, monkeypatch, hostile):
+    base = tmp_path / hostile / "x"
     touch(base / "a.JPG")
     p = export_of(base, "a")
     b = p.read_bytes()
@@ -372,15 +382,15 @@ def test_a_failed_verification_leaves_the_original(tmp_path, monkeypatch):
 
 
 @real
-def test_an_export_edited_meanwhile_is_not_replaced(tmp_path, monkeypatch):
-    base = tmp_path / HOSTILE / "x"
+def test_an_export_edited_meanwhile_is_not_replaced(tmp_path, monkeypatch, hostile):
+    base = tmp_path / hostile / "x"
     touch(base / "a.JPG")
     p = export_of(base, "a")
     real_run = pot.run_exiftool
 
     def run_and_edit(args, **kw):
         r = real_run(args, **kw)
-        if args and args[0] == "-o":
+        if "-o" in args or "-overwrite_original" in args:   # the write itself
             with open(p, "ab") as f:      # the owner saves the file meanwhile
                 f.write(b"\0")
         return r
@@ -415,13 +425,13 @@ def test_workers_and_spawn_mode_write_the_same(library, tmp_path, monkeypatch,
                                                 workers, stay_open):
     base, e = library
     monkeypatch.setattr(pot, "EXIFTOOL_STAY_OPEN", stay_open)
-    assert run(tmp_path / HOSTILE, "--apply", "--workers", workers) == 0
+    assert run(base.parent, "--apply", "--workers", workers) == 0
     assert not pot._ALL_PROCS                  # every exiftool closed at the end
     assert tags(e["raw"]) == ([], "Source: RAW")
     assert tags(e["jpeg"]) == (["jxlphoto-origin:jpeg"], "Source: JPEG")
     assert tags(e["tiff8"]) == (["jxlphoto-origin:tiff8"],
                                 "Source: TIFF 8-bit, no color profile")
-    assert not list((tmp_path / HOSTILE).rglob(f"*{pot.TEMP_MARK}*"))
+    assert not list(base.parent.rglob(f"*{pot.TEMP_MARK}*"))
     pot.close_exiftools()
 
 

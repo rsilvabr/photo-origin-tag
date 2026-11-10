@@ -8,8 +8,8 @@ import pytest
 
 import photo_origin_tag as pot
 from test_photo_origin_tag import (  # noqa: F401 - _isolated is an autouse fixture
-    HOSTILE, _isolated, make_icc, make_jpeg, make_tiff, real, report_rows, run,
-    set_tags, tags, touch)
+    HOSTILE, _isolated, hostile, make_icc, make_jpeg, make_tiff, real,
+    report_rows, run, set_tags, tags, touch)
 
 HAVE_CODECS = shutil.which("cjxl") is not None and shutil.which("djxl") is not None
 codecs = pytest.mark.skipif(not HAVE_CODECS, reason="needs cjxl and djxl")
@@ -52,8 +52,8 @@ def segments(path):
 
 
 @pytest.fixture
-def base(tmp_path):
-    return tmp_path / HOSTILE / "01_Z7"
+def base(tmp_path, hostile):
+    return tmp_path / hostile / "01_Z7"
 
 
 # ------------------------------------------------------------------ discovery
@@ -158,12 +158,14 @@ def test_the_signal_still_says_raw(base):
 
 
 @real
-def test_a_tiff_export_still_reads_no_signal_as_jpeg(base):
-    """Only JPEG exports lost that inference: a TIFF export keeps its metadata."""
+def test_a_tiff_export_without_the_signal_needs_a_green_label_too(base, tmp_path):
+    """Since 0.5.0 a missing signal proves nothing in a TIFF export either."""
     pair(base)
     p = make_tiff(base / "_EXPORT" / "TIFF16" / "DSC_0001_ProPhoto.tif")
+    before = p.read_bytes()
     assert run(base, "--apply") == 0
-    assert tags(p)[1].startswith("Source: JPEG")
+    assert p.read_bytes() == before
+    assert report_rows(tmp_path)[p.name]["action"] == "review"
 
 
 # -------------------------------------------------------------------- refusals

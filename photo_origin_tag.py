@@ -18,22 +18,27 @@ Once it has an archive in _EXPORT\\JXL_jpeg it is refused, because tagging it
 would make the JPEG differ from what that archive gives back.
 
 The default run is a simulation; --apply writes. A file is only rewritten
-through a temporary copy that exiftool writes next to it, which is checked
-(image bytes, ICC profile, every other tag unchanged) before it replaces the
-original. Nothing is ever guessed: an export the rules cannot decide is left
-alone and listed for review; overrides.csv settles it.
+through a temporary copy next to it (written by exiftool, or copied by Python
+and edited in place when the path has a %), which is checked (image bytes, ICC
+profile, every other tag unchanged) before it replaces the original. Nothing
+is ever guessed: an export the rules cannot decide is left alone and listed
+for review; overrides.csv settles it.
 """
 
 import argparse
+import atexit
 import csv
 import datetime as _dt
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,19 +53,25 @@ RAW_EXTS = (".nef", ".nrw", ".orf", ".cr2", ".cr3", ".crw", ".arw", ".srf",
             ".sr2", ".dng", ".raf", ".rw2", ".pef", ".srw", ".x3f", ".3fr",
             ".iiq", ".erf", ".kdc", ".dcr", ".mrw", ".mos")
 # RAW formats whose export carries a machine-readable RAW signal (XMP-crd or
-# ExifIFD:SubjectDistance, both only from the NEF's makernotes): their
-# RAW+JPEG pair is decided without the label.
+# ExifIFD:SubjectDistance, taken from the NEF's makernotes): their RAW+JPEG
+# pair is decided by it. A JPEG that NX Studio made from the NEF carries the
+# XMP-crd too (14 real cases), so the signal only counts while the JPEG beside
+# the export does not carry it.
 SIGNAL_RAW_EXTS = (".nef", ".nrw")
+SIGNAL_TAGS = ["-XMP-crd:all", "-ExifIFD:SubjectDistance"]
+# What exiftool must say a readable export is (File:FileType), by extension.
+TIFF_FILETYPES = ("TIFF", "BTF")
+JPEG_FILETYPES = ("JPEG",)
 JPEG_EXTS = (".jpg", ".jpeg")
 TIFF_EXTS = (".tif", ".tiff")
 LABEL_RAW = "Blue"                   # C1 colour label: exported from a RAW
 LABEL_NOT_RAW = "Green"              # C1 colour label: exported from JPEG/TIFF
 COMMENT_PREFIX = "Source: "
 COMMENTS = {
-    "raw": "Source: RAW",
-    "jpeg": "Source: JPEG",
-    "tiff8": "Source: TIFF 8-bit",
-    "tiff16": "Source: TIFF 16-bit",
+    "raw": COMMENT_PREFIX + "RAW",
+    "jpeg": COMMENT_PREFIX + "JPEG",
+    "tiff8": COMMENT_PREFIX + "TIFF 8-bit",
+    "tiff16": COMMENT_PREFIX + "TIFF 16-bit",
 }
 # The original's colour profile follows the source type in the comment
 # ("Source: JPEG, Adobe RGB (1998)"), for JPEG and TIFF originals only: a RAW
@@ -91,6 +102,9 @@ WRITE_WORKERS = 1                    # files written at once (--workers). Measur
                                      # difference -- the run already moves ~205 MB/s,
                                      # the disk's limit (2026-11-07)
 TEMP_MARK = "~origin-tag-tmp"        # temporary files carry this in the name
+# exiftool's own temporary, when it edits a file in place (a path with a %, see
+# write_item): <name><suffix> next to the file, renamed over it when done.
+EXIFTOOL_INPLACE_SUFFIX = "_exiftool_tmp"
 # Tags exiftool may change when it rewrites a TIFF, besides the two we write.
 # Anything else differing between the original and the rewritten copy is an
 # error and the copy is discarded.
@@ -105,7 +119,16 @@ REWRITE_VOLATILE = {
 # the Exif segment grows. What they point to is checked: the thumbnail is a tag
 # of its own, and the images after the scan are in the JPEG fingerprint.
 JPEG_POSITION_TAGS = {"ThumbnailOffset", "MPImageStart"}
-VERSION = "0.4.0"
+# A JPEG with no Exif at all gets a new IFD0 when the comment is written, and
+# exiftool fills it with these mandatory tags: not a change to the file's data.
+JPEG_NEW_EXIF_TAGS = {"IFD0:XResolution", "IFD0:YResolution",
+                      "IFD0:ResolutionUnit", "IFD0:YCbCrPositioning"}
+# Exit codes (a scheduled task stops at EXIT_USAGE and above).
+EXIT_OK = 0
+EXIT_FILE_ERRORS = 1                 # some file errored and stayed as it was
+EXIT_USAGE = 2                       # bad arguments or configuration
+EXIT_ABORTED = 3                     # the run was aborted (exception, Ctrl+C)
+VERSION = "0.5.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)
@@ -219,6 +242,11 @@ def close_exiftools():
         _ALL_PROCS.pop().close()
 
 
+# a -stay_open exiftool does not leave when its stdin closes: without this a
+# run that ends any other way than main()'s finally leaves it behind
+atexit.register(close_exiftools)
+
+
 def run_exiftool(args, timeout=EXIFTOOL_TIMEOUT):
     """Run one exiftool command. Returns (returncode, stdout, stderr).
     With EXIFTOOL_STAY_OPEN the command goes to this thread's persistent
@@ -240,13 +268,11 @@ def _run_exiftool_spawn(args, timeout=EXIFTOOL_TIMEOUT):
     """Run exiftool with `args` in a UTF-8 argfile (Japanese, [ ], %, long
     paths). Returns (returncode, stdout, stderr)."""
     import tempfile
+    _check_args(args)
     fd, argfile = tempfile.mkstemp(prefix="photo-origin-tag-", suffix=".args")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write("-charset\nfilename=utf8\n-api\nWindowsLongPath=1\n")
-            for a in args:
-                if "\n" in str(a):
-                    raise ValueError(f"newline in exiftool argument: {a!r}")
+            for a in (*_ARG_PREFIX, *args):
                 f.write(f"{a}\n")
         r = subprocess.run([EXIFTOOL, "-@", argfile], capture_output=True,
                            timeout=timeout)
@@ -259,21 +285,33 @@ def _run_exiftool_spawn(args, timeout=EXIFTOOL_TIMEOUT):
             pass
 
 
+def _read_chunk(chunk, tags, extra):
+    """{key(path): entry} for one exiftool call; raises when the process timed
+    out or died, or its answer is not JSON."""
+    rc, so, se = run_exiftool(["-j", "-G1", "-n", *extra, *tags,
+                               *[str(p) for p in chunk]])
+    data = json.loads(so) if so.strip() else []
+    return {_key(e.get("SourceFile", "")): e for e in data}
+
+
 def read_tags(paths, tags, extra=(), progress=None):
     """{key(path): entry} for every path exiftool answered; a path missing
-    from the result could not be read (the caller decides what that means)."""
+    from the result could not be read (the caller decides what that means).
+    A batch that fails as a whole (timeout, exiftool died, an answer that is
+    not JSON) is read again file by file, so one bad file only costs itself."""
     out = {}
     paths = list(paths)
     for i in range(0, len(paths), READ_BATCH):
         chunk = paths[i:i + READ_BATCH]
-        rc, so, se = run_exiftool(["-j", "-G1", "-n", *extra, *tags,
-                                   *[str(p) for p in chunk]])
         try:
-            data = json.loads(so) if so.strip() else []
-        except json.JSONDecodeError:
-            data = []
-        for e in data:
-            out[_key(e.get("SourceFile", ""))] = e
+            out.update(_read_chunk(chunk, tags, extra))
+        except (TimeoutError, OSError, ValueError):   # ValueError: bad JSON, newline
+            if len(chunk) > 1:
+                for p in chunk:
+                    try:
+                        out.update(_read_chunk([p], tags, extra))
+                    except (TimeoutError, OSError, ValueError):
+                        pass
         if progress:
             progress(min(i + READ_BATCH, len(paths)), len(paths))
     return out
@@ -322,10 +360,12 @@ def jpg_archive_path(path: Path) -> Path:
 
 def clean_stale_temps(roots):
     """Delete the temporary copies a killed run left behind. Only files named
-    <stem><TEMP_MARK>-<pid><ext> whose original <stem><ext> still exists are
-    removed (the original is never at risk: it is replaced atomically)."""
-    import re
-    pat = re.compile(r"^(?P<stem>.*)" + re.escape(TEMP_MARK) + r"-\d+(?P<ext>\.[^.]+)$")
+    <stem><TEMP_MARK>-<pid><ext>[EXIFTOOL_INPLACE_SUFFIX] whose original
+    <stem><ext> still exists are removed (the original is never at risk: it
+    is replaced atomically)."""
+    pat = re.compile(r"^(?P<stem>.*)" + re.escape(TEMP_MARK)
+                     + r"-\d+(?P<ext>\.[^.]+?)(?:" + re.escape(EXIFTOOL_INPLACE_SUFFIX)
+                     + r")?$")
     removed = []
     for root in roots:
         root = Path(root)
@@ -406,26 +446,48 @@ class Override:
     used: int = 0
 
 
+class UsageError(Exception):
+    """Bad arguments or configuration: the run does not start (EXIT_USAGE)."""
+
+
 def load_overrides(path: Path):
     """overrides.csv: path,origin,note (UTF-8, header row). A path names a
-    file or a folder; the most specific match wins."""
+    file or a folder; the most specific match wins. The same path twice is
+    fine with the same origin (the first line stays) and an error otherwise."""
     if not path.exists():
         return []
-    out = []
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        rd = csv.DictReader(f)
-        missing = {"path", "origin"} - set(rd.fieldnames or [])
-        if missing:
-            raise SystemExit(f"{path}: missing column(s) {sorted(missing)}")
-        for n, row in enumerate(rd, start=2):
-            p = (row.get("path") or "").strip()
-            o = (row.get("origin") or "").strip().lower()
-            if not p or p.startswith("#"):
-                continue
-            if o not in _KINDS:
-                raise SystemExit(f"{path}:{n}: origin {o!r} is not one of "
-                                 f"{', '.join(_KINDS)}")
-            out.append(Override(_key(p), o, (row.get("note") or "").strip(), n))
+    out, seen = [], {}
+    try:
+        with open(path, encoding="utf-8-sig", newline="") as f:
+            rd = csv.DictReader(f)
+            names = rd.fieldnames or []
+            missing = {"path", "origin"} - set(names)
+            if missing:
+                hint = ("; the separator must be a comma"
+                        if any(";" in (h or "") for h in names) else "")
+                raise UsageError(f"{path}: missing column(s) {sorted(missing)}{hint}")
+            for n, row in enumerate(rd, start=2):
+                p = (row.get("path") or "").strip()
+                o = (row.get("origin") or "").strip().lower()
+                if not p or p.startswith("#"):
+                    continue
+                if o not in _KINDS:
+                    raise UsageError(f"{path}:{n}: origin {o!r} is not one of "
+                                     f"{', '.join(_KINDS)}")
+                k = _key(p)
+                if k in seen:
+                    first = seen[k]
+                    if first.origin != o:
+                        raise UsageError(
+                            f"{path}: line {first.line} says {first.origin} and line "
+                            f"{n} says {o} for the same path: {p}")
+                    continue                      # same origin twice: the first stays
+                seen[k] = Override(k, o, (row.get("note") or "").strip(), n)
+                out.append(seen[k])
+    except UnicodeDecodeError:
+        raise UsageError(f'{path}: not UTF-8 (save it as "CSV UTF-8")') from None
+    except csv.Error as e:
+        raise UsageError(f"{path}: not a readable CSV ({e})") from None
     return out
 
 
@@ -459,19 +521,26 @@ def _depth_kind(bits):
     return None
 
 
+def has_signal(meta: dict) -> bool:
+    """The machine-readable RAW signal in an exiftool entry (-G1 keys)."""
+    return (any(k.startswith("XMP-crd:") for k in meta)
+            or "ExifIFD:SubjectDistance" in meta)
+
+
 def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
-             jpeg_export=False) -> Decision:
+             jpeg_has_signal=False) -> Decision:
     """Decide one export.
 
-    exts:        {ext: filename} of the original(s) beside the export (the
-                 longest-prefix sibling), {} when none was found.
-    meta:        the export's exiftool entry (-G1 keys).
-    tiff_bits:   BitsPerSample of the original TIFF, when there is one.
-    override:    an Override, which wins over everything.
-    jpeg_export: the export is a JPEG, whose recipe may have dropped the RAW
-                 signal (Capture One's WEB recipe does), so a missing signal
-                 proves nothing without a Green label."""
+    exts:            {ext: filename} of the original(s) beside the export (the
+                     longest-prefix sibling), {} when none was found.
+    meta:            the export's exiftool entry (-G1 keys).
+    tiff_bits:       BitsPerSample of the original TIFF, when there is one.
+    override:        an Override, which wins over everything.
+    jpeg_has_signal: in a NEF+JPEG pair, the JPEG beside carries the RAW signal
+                     too (NX Studio copies it), so the export's signal proves
+                     nothing and only the label decides."""
     # sidecars (.xmp, ...) beside the original are not originals
+    others = sorted(exts.values())
     exts = {e: n for e, n in exts.items()
             if e in RAW_EXTS or e in JPEG_EXTS or e in TIFF_EXTS}
     names = "+".join(sorted(exts.values()))
@@ -482,26 +551,37 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
     raw = sorted(e for e in exts if e in RAW_EXTS)
     jpg = [e for e in exts if e in JPEG_EXTS]
     tif = sorted(e for e in exts if e in TIFF_EXTS)
-    signal = (any(k.startswith("XMP-crd:") for k in meta)
-              or "ExifIFD:SubjectDistance" in meta)
+    signal = has_signal(meta)
 
     def review(why):
         return Decision(None, "", why, names)
 
     if not exts:
+        if others:
+            return review(f"no original found beside the export (only "
+                          f"{', '.join(others)}, not a RAW/JPEG/TIFF)")
         return review("no original found beside the export")
     if raw and jpg and not tif:
         if all(e in SIGNAL_RAW_EXTS for e in raw):
-            kind = "raw" if signal else "jpeg"
-            if label == LABEL_RAW and kind != "raw":
+            if label == LABEL_RAW and not signal:
                 return review("label Blue but no RAW signal in a NEF+JPEG pair")
-            if label == LABEL_NOT_RAW and kind == "raw":
+            if signal and jpeg_has_signal:
+                # the signal is no proof: the JPEG beside has it too
+                if label == LABEL_NOT_RAW:
+                    return Decision("jpeg", "NEF+JPEG pair, the JPEG carries the "
+                                    "signal too, label Green", original=names)
+                return review("RAW signal, but the JPEG beside carries it too "
+                              "(NX Studio?): needs a Blue or Green label")
+            if label == LABEL_NOT_RAW and signal:
                 return review("label Green but the export carries a RAW signal")
-            if jpeg_export and not signal and label != LABEL_NOT_RAW:
-                return review("NEF+JPEG pair, JPEG export without a RAW signal "
-                              "or a Green label (its recipe may drop metadata)")
-            return Decision(kind, "NEF+JPEG pair, RAW signal" if signal
-                            else "NEF+JPEG pair, no RAW signal", original=names)
+            if not signal and label != LABEL_NOT_RAW:
+                # a missing signal proves nothing (Capture One's WEB recipe
+                # drops it): only a Green label makes it a JPEG
+                return review("NEF+JPEG pair without a RAW signal or a Green label")
+            return Decision("raw" if signal else "jpeg",
+                            "NEF+JPEG pair, RAW signal" if signal
+                            else "NEF+JPEG pair, no RAW signal, label Green",
+                            original=names)
         if label == LABEL_RAW:
             return Decision("raw", "RAW+JPEG pair, label Blue", original=names)
         if label == LABEL_NOT_RAW:
@@ -658,7 +738,9 @@ def plan_item(it: Item, meta: dict, overridden: bool):
     want_c = comment_for(d.kind, it.profile)
     cur_c = str(meta.get("IFD0:XPComment", "") or "")
     if cur_c.strip() and cur_c != want_c:
-        if not cur_c.startswith(COMMENT_PREFIX):
+        if comment_kind(cur_c) is None:
+            # not exactly a comment of this script (a "Source: ..." the owner
+            # wrote is someone else's text too): never replaced, override or not
             it.action = "refuse"
             it.reason = f"XPComment already holds someone else's text: {cur_c[:60]!r}"
             return
@@ -767,19 +849,29 @@ def write_item(it: Item):
     'written' or 'error'."""
     src = it.path
     tmp = src.with_name(f"{src.stem}{TEMP_MARK}-{os.getpid()}{src.suffix}")
+    tmp_inplace = tmp.with_name(tmp.name + EXIFTOOL_INPLACE_SUFFIX)
     fingerprint = jpeg_fingerprint if src.suffix.lower() in JPEG_EXTS else image_fingerprint
     try:
         st0 = src.stat()
         fp0 = fingerprint(src)
         tags0 = all_tags(src)
-        args = ["-o", str(tmp)]
+        # exiftool reads %d %f %e %c in the name given to -o as format codes
+        # (and %% is no escape), so a path with a % makes it create the copy
+        # somewhere else. For those paths Python makes the copy and exiftool
+        # edits it in place, which names no output file.
+        via_copy = "%" in str(tmp)
+        if via_copy:
+            shutil.copyfile(src, tmp)
+            args = ["-overwrite_original"]
+        else:
+            args = ["-o", str(tmp)]
         for t in it.relation_remove:
             args.append(f"-XMP-dc:Relation-={t}")
         if it.relation_add:
             args.append(f"-XMP-dc:Relation+={it.relation_add}")
         if it.comment is not None:
             args.append(f"-IFD0:XPComment={it.comment}")
-        args.append(str(src))
+        args.append(str(tmp) if via_copy else str(src))
         rc, so, se = run_exiftool(args)
         if rc != 0 or not tmp.exists():
             raise OSError(f"exiftool failed: {(se or so).strip()[:300]}")
@@ -790,6 +882,9 @@ def write_item(it: Item):
         if fingerprint is jpeg_fingerprint:
             allowed |= {k for k in {*tags0, *tags1}
                         if k.rsplit(":", 1)[-1] in JPEG_POSITION_TAGS}
+            if not any(k.startswith(("IFD0:", "ExifIFD:")) for k in tags0):
+                # no Exif at all: the new IFD0 comes with its mandatory tags
+                allowed |= JPEG_NEW_EXIF_TAGS - set(tags0)
         diff = tag_differences(tags0, tags1, allowed)
         if diff:
             raise OSError(f"unexpected tag change(s): {', '.join(diff[:6])}")
@@ -811,11 +906,12 @@ def write_item(it: Item):
     except Exception as e:  # noqa: BLE001 - every failure is reported per file
         it.action, it.reason = "error", f"{type(e).__name__}: {e}"
     finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
+        for leftover in (tmp, tmp_inplace):
+            if leftover.exists():
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
 
 
 # ---------------------------------------------------------------------------
@@ -840,18 +936,62 @@ class Progress:
             print()
 
 
+def _unreadable_export(path: Path, entry):
+    """Why an export cannot be planned, or "" when exiftool read it as the
+    kind of file its extension says. For a file it cannot parse exiftool
+    answers with an Error, or with another File:FileType, not with nothing."""
+    if entry is None:
+        return "no answer"
+    if entry.get("ExifTool:Error"):
+        return str(entry["ExifTool:Error"])[:80]
+    expected = (JPEG_FILETYPES if path.suffix.lower() in JPEG_EXTS
+                else TIFF_FILETYPES)
+    ftype = str(entry.get("File:FileType", ""))
+    if ftype.upper() not in expected:
+        return f"File:FileType {ftype or 'missing'}, expected {'/'.join(expected)}"
+    return ""
+
+
+def _jpegs_with_signal(items, overrides):
+    """{key(export path): bool} for the exports whose RAW signal needs a second
+    opinion: NEF+JPEG pairs where the export carries the signal, there is no
+    override and no label says Blue (a Blue label decides without it). True
+    when a JPEG beside it carries the signal too. A JPEG exiftool cannot read
+    counts as not carrying it."""
+    suspects, jpegs = {}, {}
+    for it, m, exts, tpath in items:
+        if m is None or find_override(it.path, overrides) is not None:
+            continue
+        raw = [e for e in exts if e in RAW_EXTS]
+        jpg = sorted(e for e in exts if e in JPEG_EXTS)
+        if (raw and jpg and not any(e in TIFF_EXTS for e in exts)
+                and all(e in SIGNAL_RAW_EXTS for e in raw)
+                and has_signal(m) and it.label != LABEL_RAW):
+            files = [export_base(it.path) / exts[e] for e in jpg]
+            suspects[_key(it.path)] = [_key(f) for f in files]
+            jpegs.update({_key(f): f for f in files})
+    if not jpegs:
+        return {}
+    got = read_tags(list(jpegs.values()), SIGNAL_TAGS, extra=["-fast2"],
+                    progress=Progress("reading JPEGs beside a RAW signal"))
+    return {k: any(has_signal(got.get(j, {})) for j in js)
+            for k, js in suspects.items()}
+
+
 def build_items(exports, overrides):
     p = Progress("reading exports")
-    meta = read_tags(exports, ["-XMP-xmp:Label", "-XMP-crd:all",
-                               "-ExifIFD:SubjectDistance", "-XMP-dc:Relation",
-                               "-IFD0:XPComment", "-IFD0:Model"],
+    meta = read_tags(exports, ["-XMP-xmp:Label", *SIGNAL_TAGS, "-XMP-dc:Relation",
+                               "-IFD0:XPComment", "-IFD0:Model",
+                               "-File:FileType", "-ExifTool:Error"],
                      extra=["-fast2"], progress=p)
     items, origs = [], {}
     for x in exports:
         it = Item(x)
         m = meta.get(_key(x))
-        if m is None:
-            it.action, it.reason = "error", "exiftool could not read the export"
+        unreadable = _unreadable_export(x, m)
+        if unreadable:
+            it.action = "error"
+            it.reason = f"exiftool could not read the export ({unreadable})"
             items.append((it, None, None, None))
             continue
         it.label = str(m.get("XMP-xmp:Label", "") or "")
@@ -870,6 +1010,7 @@ def build_items(exports, overrides):
     orig_meta = read_tags(list(origs.values()),
                           ["-IFD0:BitsPerSample", *PROFILE_TAGS],
                           extra=["-fast2"], progress=p2) if origs else {}
+    jpeg_signal = _jpegs_with_signal(items, overrides)
     decided = []
     for it, m, exts, tpath in items:
         if m is None:
@@ -881,7 +1022,8 @@ def build_items(exports, overrides):
         if tpath is not None:
             e = orig_meta.get(_key(tpath))
             tb = e.get("IFD0:BitsPerSample") if e else None
-        it.decision = classify(exts, m, tb, ov, is_jpg_only_export(it.path))
+        it.decision = classify(exts, m, tb, ov,
+                               jpeg_has_signal=jpeg_signal.get(_key(it.path), False))
         src = source_file(it.decision.kind, exts) if PROFILE_IN_COMMENT else None
         decided.append((it, m, ov, export_base(it.path) / src if src else None))
     # the profile of the JPEG originals the rules picked (read only for those)
@@ -929,47 +1071,34 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.workers < 1:
         print("ERROR: --workers must be at least 1", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
     try:
         return _main(a)
+    except UsageError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    except KeyboardInterrupt:
+        print("\nERROR: interrupted (Ctrl+C): the run was aborted", file=sys.stderr)
+        return EXIT_ABORTED
+    except Exception:  # noqa: BLE001 - the run is over either way: say so, exit 3
+        traceback.print_exc()
+        print("ERROR: the run was aborted by an unexpected error", file=sys.stderr)
+        return EXIT_ABORTED
     finally:
         close_exiftools()
 
 
-def _main(a):
-
-    if a.apply:
-        try:
-            import tifffile  # noqa: F401 - the write check needs it
-        except ImportError:
-            print("ERROR: --apply needs the Python package tifffile "
-                  "(pip install tifffile)", file=sys.stderr)
-            return 2
-    for r in a.roots:
-        if not Path(r).exists():
-            print(f"ERROR: not found: {r}", file=sys.stderr)
-            return 2
-    ov_path = Path(a.overrides) if a.overrides else \
-        Path(__file__).resolve().parent / OVERRIDES_FILE
-    overrides = load_overrides(ov_path)
-    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    report = Path(a.report) if a.report else log_dir() / f"{stamp}_report.csv"
-
-    print(f"photo-origin-tag {VERSION} | {'APPLY' if a.apply else 'SIMULATION'}"
-          f" | overrides: {len(overrides)} ({ov_path})")
-    if a.apply:
-        for t in clean_stale_temps(a.roots):
-            print(f"  removed a temporary file left by an interrupted run: {t}")
-    print("  finding exports ...", flush=True)
-    exports = find_exports(a.roots)
-    print(f"  {len(exports)} export(s) below {EXPORT_FOLDER}")
-    items = build_items(exports, overrides)
-
-    if a.apply:
-        todo = [it for it in items if it.action == "write"]
-        logf = log_dir() / f"{stamp}_written.log"
-        logf.parent.mkdir(parents=True, exist_ok=True)
-        p = Progress("writing")
+def _write_all(items, workers, stamp):
+    """Write every item the plan marked `write`, logging each. If the run is
+    cut short (Ctrl+C, any exception) the items not written keep `write` with
+    a reason saying they were not attempted, and the exception goes on."""
+    todo = [it for it in items if it.action == "write"]
+    if not todo:
+        return                                # no empty per-file log
+    logf = log_dir() / f"{stamp}_written.log"
+    logf.parent.mkdir(parents=True, exist_ok=True)
+    p = Progress("writing")
+    try:
         with open(logf, "a", encoding="utf-8") as lg:
             def done(n, it):
                 lg.write(f"{_dt.datetime.now():%H:%M:%S}\t{it.action}\t"
@@ -978,19 +1107,33 @@ def _main(a):
                 if it.action == "error":
                     print(f"\n  ERROR {it.path}: {it.reason}")
                 p(n, len(todo))
-            if a.workers == 1:
+            if workers == 1:
                 for n, it in enumerate(todo, 1):
                     write_item(it)
                     done(n, it)
             else:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
-                with ThreadPoolExecutor(max_workers=a.workers) as ex:
+                ex = ThreadPoolExecutor(max_workers=workers)
+                try:
                     futs = {ex.submit(write_item, it): it for it in todo}
                     for n, f in enumerate(as_completed(futs), 1):
                         f.result()        # write_item reports its own errors
                         done(n, futs[f])
+                except BaseException:
+                    # queued files are dropped, the ones running finish
+                    ex.shutdown(wait=True, cancel_futures=True)
+                    raise
+                ex.shutdown(wait=True)
         print(f"  per-file log: {logf}")
+    except BaseException:
+        for it in todo:
+            if it.action == "write":
+                it.reason = "not attempted: the run was interrupted"
+        raise
 
+
+def _finish(items, overrides, report, apply):
+    """The report and the summary: written whatever happened to the run."""
     write_report(items, report)
     from collections import Counter
     c = Counter((it.action, it.decision.kind or "-") for it in items)
@@ -1014,10 +1157,52 @@ def _main(a):
             print(f"  {it.action:<7} {it.reason} | {it.path}")
         if len(rev) > 40:
             print(f"  ... {len(rev) - 40} more")
+    jpg_review = sum(1 for it in items
+                     if it.action == "review" and is_jpg_only_export(it.path))
+    if jpg_review:
+        print(f"\n{jpg_review} JPEG(s) below {JPG_ONLY_FOLDER} stay without a "
+              f"comment; once archived in {JPG_ARCHIVE_FOLDER} they cannot be tagged")
     print(f"\nReport: {report}")
-    if not a.apply and any(it.action == "write" for it in items):
+    if not apply and any(it.action == "write" for it in items):
         print("Simulation: nothing was written. Run again with --apply.")
-    return 1 if any(it.action == "error" for it in items) else 0
+
+
+def _main(a):
+    if a.apply:
+        try:
+            import tifffile  # noqa: F401 - the write check needs it
+        except ImportError:
+            raise UsageError("--apply needs the Python package tifffile "
+                             "(pip install tifffile)") from None
+    for r in a.roots:
+        if not Path(r).exists():
+            raise UsageError(f"not found: {r}")
+    # absolute, so that the _EXPORT segment and the overrides' paths are seen
+    # (abspath, not resolve(): resolve() follows junctions and turns a mapped
+    # drive letter into a UNC path, and the overrides' G:\... would not match)
+    roots = [os.path.abspath(r) for r in a.roots]
+    ov_path = Path(a.overrides) if a.overrides else \
+        Path(__file__).resolve().parent / OVERRIDES_FILE
+    overrides = load_overrides(ov_path)
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    report = Path(a.report) if a.report else log_dir() / f"{stamp}_report.csv"
+
+    print(f"photo-origin-tag {VERSION} | {'APPLY' if a.apply else 'SIMULATION'}"
+          f" | overrides: {len(overrides)} ({ov_path})")
+    if a.apply:
+        for t in clean_stale_temps(roots):
+            print(f"  removed a temporary file left by an interrupted run: {t}")
+    print("  finding exports ...", flush=True)
+    exports = find_exports(roots)
+    print(f"  {len(exports)} export(s) below {EXPORT_FOLDER}")
+    items = build_items(exports, overrides)
+
+    try:
+        if a.apply:
+            _write_all(items, a.workers, stamp)
+    finally:
+        _finish(items, overrides, report, a.apply)
+    return EXIT_FILE_ERRORS if any(it.action == "error" for it in items) else EXIT_OK
 
 
 if __name__ == "__main__":

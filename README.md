@@ -47,8 +47,12 @@ jxl-photo's sync then re-encodes the master.
 3. Other RAW+JPEG pairs (Fuji RAF) and RAW+TIFF pairs (Olympus ORF + OM
    Workspace TIFF): the Capture One label decides (Blue = RAW, Green = JPEG or
    the TIFF's depth).
-4. `overrides.csv` wins over everything.
-5. It never guesses: no original, an unexpected mix, a label that
+4. RAW+JPEG+TIFF trio beside the export (the S5Pro's `DSCF` RAF+JPG+TIF):
+   review by default. With `--trio-blue-raw`, a Blue label → RAW (a NEF trio
+   also needs the RAW signal); any other label → review, since Green cannot
+   tell the JPEG from the TIFF. The owner's presets pass the option.
+5. `overrides.csv` wins over everything.
+6. It never guesses: no original, an unexpected mix, a label that
    contradicts the file, or a NEF+JPEG pair with neither the signal nor a
    Green label → left alone and listed for review.
 
@@ -58,6 +62,10 @@ jxl-photo's sync then re-encodes the master.
 py photo_origin_tag.py G:\2024 G:\2025 G:\2026            # simulation
 py photo_origin_tag.py G:\2024 G:\2025 G:\2026 --apply    # write
 ```
+
+`--trio-blue-raw` turns on the trio rule above (setting `TRIO_BLUE_IS_RAW`,
+off). `--report <csv>` puts the report somewhere else; `--workers` is in
+"Speed".
 
 Needs Python 3 (3.12 and 3.13 are the ones in use), exiftool 13.x on the PATH and, for `--apply`, the
 `tifffile` package (`pip install tifffile`; it checks the image bytes). The

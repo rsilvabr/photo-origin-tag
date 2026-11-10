@@ -60,6 +60,12 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
      C1 (azul = RAW, verde = JPEG). O relatório marca "decidido pelo label".
 4. **Par RAW+TIFF (Olympus: ORF + TIF do OM Workspace):** decide o label
    (azul = RAW, verde = profundidade do TIF).
+4b. **Trio RAW+JPEG+TIFF** (os `DSCF` RAF+JPG+TIF da S5Pro): revisão por
+   padrão. Com `--trio-blue-raw` (v0.6.0, configuração `TRIO_BLUE_IS_RAW`,
+   desligada no script, ligada pelo dono nos presets em 11/11): label azul =
+   RAW (trio de NEF precisa também do sinal); qualquer outro label = revisão
+   (o verde não diz se veio do JPEG ou do TIFF). Simulação de 11/11 no
+   G:\2024-2026: os 18 trios reais são todos `DSCF` azuis.
 5. **Overrides** (`overrides.csv`: caminho de arquivo ou de pasta → origem,
    com observação) vencem tudo. É onde ficam as conferências manuais do dono.
 6. **Nunca chuta.** Fica sem carimbo e vai para a lista de revisão: sem
@@ -116,8 +122,10 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
 
 - Agora: rodar em todo o G: (2024 → 2026), conferir a lista de revisão,
   depois `--apply`, depois o REBUILD dos masters.
-- Daqui pra frente: um passo antes do SYNC (um `.bat` nos presets), rodando
-  só nas pastas novas.
+- Daqui pra frente: um passo antes do SYNC PHOTOS na tarefa agendada
+  (`jxl-photo_LOCAL\run_scheduled_presets.cmd`, desde 11/11): `--apply
+  --trio-blue-raw` em G:\2024-2026; código ≥ 2 = o tagger não rodou e nada
+  mais roda nesse dia (nenhum JPEG é arquivado sem o comentário).
 - Nenhum preset muda: o SRGB já roda com `--on-regeneration convert`, e o
   JPG MOBILE é o transcoder (JXL → JPEG), que não tem essa trava.
 - Decidido 07/11: grava SÓ nos TIFFs e refaz masters + cópias (sem editar

@@ -66,6 +66,11 @@ JPEG_EXTS = (".jpg", ".jpeg")
 TIFF_EXTS = (".tif", ".tiff")
 LABEL_RAW = "Blue"                   # C1 colour label: exported from a RAW
 LABEL_NOT_RAW = "Green"              # C1 colour label: exported from JPEG/TIFF
+# A RAW + JPEG + TIFF trio beside the export with a Blue label counts as RAW
+# (--trio-blue-raw turns it on for one run). Off by default: the trio is the
+# owner's heuristic (the S5Pro DSCF trios, all Blue), not a fact. Green never
+# decides a trio: it cannot tell the JPEG from the TIFF.
+TRIO_BLUE_IS_RAW = False
 COMMENT_PREFIX = "Source: "
 COMMENTS = {
     "raw": COMMENT_PREFIX + "RAW",
@@ -128,7 +133,7 @@ EXIT_OK = 0
 EXIT_FILE_ERRORS = 1                 # some file errored and stayed as it was
 EXIT_USAGE = 2                       # bad arguments or configuration
 EXIT_ABORTED = 3                     # the run was aborted (exception, Ctrl+C)
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)
@@ -528,7 +533,7 @@ def has_signal(meta: dict) -> bool:
 
 
 def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
-             jpeg_has_signal=False) -> Decision:
+             jpeg_has_signal=False, trio_blue_raw=TRIO_BLUE_IS_RAW) -> Decision:
     """Decide one export.
 
     exts:            {ext: filename} of the original(s) beside the export (the
@@ -538,7 +543,9 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
     override:        an Override, which wins over everything.
     jpeg_has_signal: in a NEF+JPEG pair, the JPEG beside carries the RAW signal
                      too (NX Studio copies it), so the export's signal proves
-                     nothing and only the label decides."""
+                     nothing and only the label decides.
+    trio_blue_raw:   a RAW+JPEG+TIFF trio with a Blue label counts as RAW
+                     (TRIO_BLUE_IS_RAW, --trio-blue-raw)."""
     # sidecars (.xmp, ...) beside the original are not originals
     others = sorted(exts.values())
     exts = {e: n for e, n in exts.items()
@@ -612,6 +619,13 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
         if label == LABEL_RAW and k == "tiff8":
             return review("label Blue but the original is an 8-bit TIFF")
         return Decision(k, "only a TIFF beside, TIFF depth", original=names)
+    if raw and jpg and tif and trio_blue_raw:
+        if label != LABEL_RAW:
+            return review("RAW+JPEG+TIFF beside the export: only a Blue label "
+                          "decides (Green cannot tell JPEG from TIFF)")
+        if all(e in SIGNAL_RAW_EXTS for e in raw) and not signal:
+            return review("label Blue but no RAW signal in a NEF+JPEG+TIFF trio")
+        return Decision("raw", "RAW+JPEG+TIFF trio, label Blue", original=names)
     return review(f"unexpected originals beside the export: {names}")
 
 
@@ -978,7 +992,7 @@ def _jpegs_with_signal(items, overrides):
             for k, js in suspects.items()}
 
 
-def build_items(exports, overrides):
+def build_items(exports, overrides, trio_blue_raw=TRIO_BLUE_IS_RAW):
     p = Progress("reading exports")
     meta = read_tags(exports, ["-XMP-xmp:Label", *SIGNAL_TAGS, "-XMP-dc:Relation",
                                "-IFD0:XPComment", "-IFD0:Model",
@@ -1023,7 +1037,8 @@ def build_items(exports, overrides):
             e = orig_meta.get(_key(tpath))
             tb = e.get("IFD0:BitsPerSample") if e else None
         it.decision = classify(exts, m, tb, ov,
-                               jpeg_has_signal=jpeg_signal.get(_key(it.path), False))
+                               jpeg_has_signal=jpeg_signal.get(_key(it.path), False),
+                               trio_blue_raw=trio_blue_raw)
         src = source_file(it.decision.kind, exts) if PROFILE_IN_COMMENT else None
         decided.append((it, m, ov, export_base(it.path) / src if src else None))
     # the profile of the JPEG originals the rules picked (read only for those)
@@ -1068,6 +1083,10 @@ def main(argv=None):
     ap.add_argument("--report", default=None, help="report CSV path")
     ap.add_argument("--workers", type=int, default=WRITE_WORKERS,
                     help=f"files written at once (default {WRITE_WORKERS})")
+    ap.add_argument("--trio-blue-raw", action="store_true",
+                    default=TRIO_BLUE_IS_RAW,
+                    help="a RAW+JPEG+TIFF trio beside the export with a Blue "
+                         "label counts as RAW (default: review)")
     a = ap.parse_args(argv)
     if a.workers < 1:
         print("ERROR: --workers must be at least 1", file=sys.stderr)
@@ -1188,14 +1207,15 @@ def _main(a):
     report = Path(a.report) if a.report else log_dir() / f"{stamp}_report.csv"
 
     print(f"photo-origin-tag {VERSION} | {'APPLY' if a.apply else 'SIMULATION'}"
-          f" | overrides: {len(overrides)} ({ov_path})")
+          f" | overrides: {len(overrides)} ({ov_path})"
+          f"{' | trio Blue = RAW' if a.trio_blue_raw else ''}")
     if a.apply:
         for t in clean_stale_temps(roots):
             print(f"  removed a temporary file left by an interrupted run: {t}")
     print("  finding exports ...", flush=True)
     exports = find_exports(roots)
     print(f"  {len(exports)} export(s) below {EXPORT_FOLDER}")
-    items = build_items(exports, overrides)
+    items = build_items(exports, overrides, trio_blue_raw=a.trio_blue_raw)
 
     try:
         if a.apply:

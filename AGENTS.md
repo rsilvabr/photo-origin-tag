@@ -61,8 +61,14 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
 - A comment that is not exactly one of this script's is someone else's, even
   if it starts with `Source: `: refused always, override or not.
 - The 132 JPEGs of `JPG_only` in review stay without a comment (they were all
-  archived on 10/11). The RAW+JPEG+TIFF trio keeps going to review (plan item
-  A11 was not approved).
+  archived on 10/11).
+- (v0.6.0) Plan item A11 is an OPTION, `--trio-blue-raw` (`TRIO_BLUE_IS_RAW`,
+  off in the script): a RAW+JPEG+TIFF trio with a Blue label → RAW (a NEF trio
+  also needs the signal); any other label → review. The owner's presets
+  (scheduled task and `JXL 9`) pass it.
+- Part C: the scheduled task (`jxl-photo_LOCAL\run_scheduled_presets.cmd`)
+  runs the tagger before SYNC PHOTOS and stops the day at exit code >= 2;
+  `JXL 9` stops after its step 2 at >= 2.
 
 ## Rules for changes
 - Settings live at the top of `photo_origin_tag.py`; never repeat them as
@@ -89,15 +95,17 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   add staging/batching/parallelism for one HDD without a new measurement.
 
 ## State (11/11/2026)
+- v0.6.0: `--trio-blue-raw` (A11 as an option), 146 tests. Simulation on
+  G:\2024-2026 with it (read only): 8774 exports, 18 `write raw` (all `DSCF`
+  trios, Blue), 6 TIFFs + 132 `JPG_only` JPEGs in review, 0 `error`. The 18
+  get written by the next scheduled run (Part C), not by this session.
 - v0.5.0 (audit fixes, Parts A and B of
   `AI_tools/261111_Fable_plan_audit-fixes.md`): 136 tests (63 before). The
   audit, the plan and the coder's reports are in `AI_tools/`. Reviewed on
   11/11 with a simulation on G:\2024-2026 (read only): 8774 exports, 0 `write`,
   0 `error`; every one of the 8428 TIFF rows has the action and origin of the
   08/11 report, the 346 `JPG_only` JPEGs are 214 `ok` + 132 `review`. Nothing
-  was written to G: by this work. Not decided: the RAW+JPEG+TIFF trio with a
-  Blue label (18 of the 24 TIFFs in review, S5Pro `DSCF`): rule A11 was left
-  out.
+  was written to G: by this work.
 - Since 10/11 all 346 JPEGs of `JPG_only` have their archive in `JXL_jpeg`
   (214 with the comment, 132 in review and now refused as "already archived").
 

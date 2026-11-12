@@ -2,7 +2,5 @@ path,origin,note
 # One row per file or folder the rules cannot decide (or decide wrong).
 # origin: raw / jpeg / tiff8 / tiff16. A folder row covers everything below it;
 # the most specific row wins. Lines starting with # are ignored.
-# Still undecided (07/11/2026): a JPG and a TIF with the same name beside the export
-# D:\Photos\2024\240310_Beach [FINAL]\_EXPORT\TIFF16\DSC_1207_NXstudio_ProPhoto-g22_v1.tif
-# D:\Photos\2024\240310_Beach [FINAL]\_EXPORT\TIFF16\DSC_1213_NXstudio_ProPhoto-g22_v1.tif
-# D:\Photos\2025\251124_Valley\4_C5050\_EXPORT\TIFF16\P1010028_ProPhoto-g22_v1.tif
+# Example (remove the # to use it):
+# D:\Photos\2025\250412_Park\_EXPORT\TIFF16\Park_web_01.tif,jpeg,renamed export of IMG_0002

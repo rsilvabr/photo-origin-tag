@@ -2,8 +2,10 @@
 
 Carimba nos TIFFs exportados pelo Capture One **de onde a foto veio**
 (RAW, JPEG, TIFF 8-bit ou TIFF 16-bit), antes do jxl-photo transformá-los em
-master. Repo privado: a regra depende do fluxo do dono (C1, NX Studio,
-OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
+master. A regra nasceu do fluxo do dono (C1, NX Studio, OM Workspace, layout
+`<câmera>\_EXPORT\TIFF16`). Repo público desde 12/11/2026: nada pessoal nos
+arquivos versionados (nomes reais de pastas, pessoas, lugares). O dono roda a
+cópia em `..\photo-origin-tag_LOCAL` (§5).
 
 ## 1. O que é gravado no TIFF
 
@@ -122,6 +124,12 @@ OM Workspace, layout `<câmera>\_EXPORT\TIFF16`).
 
 - Agora: rodar em todo o G: (2024 → 2026), conferir a lista de revisão,
   depois `--apply`, depois o REBUILD dos masters.
+- Onde roda (12/11): `..\photo-origin-tag_LOCAL`, sem git, como o
+  `jxl-photo_LOCAL` e o `tiff-workflow_LOCAL`. Lá ficam cópias idênticas dos
+  dois `.py` do repo, o `overrides.csv` real do dono, os `Logs\` e o estado do
+  checklist (`Logs\pastas_exportar_tiff.state.json`). A tarefa agendada, o
+  `JXL 9` e o `EXPORT - FALTA TIFF.bat` chamam a cópia de lá. O
+  `overrides.csv` do repo é só o modelo vazio.
 - Daqui pra frente: um passo antes do SYNC PHOTOS na tarefa agendada
   (`jxl-photo_LOCAL\run_scheduled_presets.cmd`, desde 11/11): `--apply
   --trio-blue-raw` em G:\2024-2026; código ≥ 2 = o tagger não rodou e nada

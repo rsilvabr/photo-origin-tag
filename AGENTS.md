@@ -1,7 +1,23 @@
 # photo-origin-tag — agent notes
 
-Owner's tool, private. Tags Capture One TIFF exports with their origin before
-jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
+The owner's tool, public since 12/11/2026. Tags Capture One TIFF exports with
+their origin before jxl-photo encodes them. Read SPEC.md (decisions) and
+README.md (use).
+
+## Public repo, local run folder (12/11/2026)
+- Nothing personal in tracked files, commits or release notes: no real folder
+  names, people or places (test folders are made up, still hostile).
+- The owner runs the copy in `GitHub\photo-origin-tag_LOCAL` (no git there),
+  like `jxl-photo_LOCAL`: the two `.py` identical to the repo, the owner's
+  real `overrides.csv`, `Logs\` and the checklist's
+  `Logs\pastas_exportar_tiff.state.json`. The scheduled task,
+  `presets_LOCAL\JXL 9 - ORIGEM + MASTERS + COPIAS.bat` and
+  `presets_LOCAL\EXPORT - FALTA TIFF.bat` call that copy. The repo's
+  `overrides.csv` is an empty template.
+- On a release: `diff` the previous tag's `.py` against `_LOCAL` (must show
+  nothing; a difference is a setting typed into a copy), then copy the two
+  `.py` there. Never overwrite or delete `_LOCAL`'s `overrides.csv` or
+  `Logs\`. Only when no tagger is running.
 
 ## Decisions taken (07/11/2026, by the owner)
 - External tool, NOT inside jxl-photo: the rules are a heuristic tied to the
@@ -117,7 +133,7 @@ jxl-photo encodes them. Read SPEC.md (decisions) and README.md (use).
   TIFF originals: Elle V2/V4 g22 150, Nikon Adobe RGB 7, ProPhoto RGB 1.
 - v0.2.0 (stay_open exiftool, --workers), 29 tests. v0.1.0 committed (tag v0.1.0). Simulation on G:\2024-2026: 7154 exports → jpeg 1971,
   tiff8 7, tiff16 965, raw 4208, review 3 (JPG+TIF with the same name, listed
-  in overrides.csv as comments). Applied to 20 real copies (every rule/year):
+  in `_LOCAL`'s overrides.csv as comments). Applied to 20 real copies (every rule/year):
   pixels, ICC and Deflate unchanged; only XPComment, dc:Relation,
   XMPToolkit and strip offsets differ; jxl-photo's master inherits both tags.
 - Applied to the TIFFs of G:\2024-2026 on 08-09/11 (exit 0). v0.4.0 (JPG_only

@@ -5,9 +5,10 @@
 
 Atalho: presets_LOCAL\\EXPORT - FALTA TIFF.bat. Só biblioteca padrão.
 
-Varre as pastas de ano em ROOT, acha toda pasta *EXPORT* (sem distinguir
-maiúsculas) e compara os TIFF dela com os JPG exportados (por foto: o nome sem
-perfil/versão/câmera). Cada linha da página é uma pasta de câmera (a que
+Varre as pastas de ano em ROOT (toda pasta de quatro dígitos a partir de
+YEARS_FROM: um ano novo entra assim que a pasta dele existe), acha toda pasta
+*EXPORT* (sem distinguir maiúsculas) e compara os TIFF dela com os JPG
+exportados (por foto: o nome sem perfil/versão/câmera). Cada linha da página é uma pasta de câmera (a que
 contém os *EXPORT*) com algo faltando, nestas categorias:
 
   1. tem _EXPORT, sem TIFF dentro
@@ -38,7 +39,9 @@ from pathlib import Path
 
 # ---------------------------------------------------------------- settings
 ROOT = "G:\\"
-YEARS = ("2024", "2025", "2026")
+# the year folders scanned: every ROOT\<four digits> from this year on that
+# exists, so a new year needs no edit here (a fixed list stopped at 2026)
+YEARS_FROM = 2024
 MAIN_EXPORT = "_EXPORT"
 # fotos que não têm mais como virar TIFF (edição do C1 perdida): ficam só em
 # JPG nesta subpasta do _EXPORT (ou de outro *EXPORT*), soltas ou em
@@ -84,7 +87,29 @@ ACCEPTED_CAT = 7
 
 
 class RootNotFound(Exception):
-    """None of the YEARS folders exists in ROOT (drive not connected?)."""
+    """No year folder (YEARS_FROM or later) in ROOT (drive not connected?)."""
+
+
+def year_dirs():
+    """The year folders in ROOT, oldest first: four-digit names from
+    YEARS_FROM on."""
+    try:
+        names = os.listdir(ROOT)
+    except OSError:
+        return []
+    return sorted(n for n in names
+                  if re.fullmatch(r"\d{4}", n) and int(n) >= YEARS_FROM
+                  and os.path.isdir(os.path.join(ROOT, n)))
+
+
+_years = []             # the year folders of the last scan
+
+
+def scope():
+    """'G:\\2024–2026': what the page and the list cover."""
+    if not _years:
+        return ROOT
+    return f"{ROOT}{_years[0]}" + (f"–{_years[-1]}" if len(_years) > 1 else "")
 
 
 def photo_key(filename):
@@ -150,6 +175,7 @@ def find_exports(year_dir, progress):
 
 
 def scan():
+    global _years
     t0, last = time.time(), [0.0]
     count = [0]
 
@@ -159,18 +185,16 @@ def scan():
             last[0] = time.time()
             print(f"\r  varrendo... {count[0]} pastas, {time.time() - t0:.0f} s", end="", flush=True)
 
-    exports = []
-    found_year = False
-    for y in YEARS:
-        yd = os.path.join(ROOT, y)
-        if os.path.isdir(yd):
-            found_year = True
-            exports += find_exports(yd, progress)
-    if not found_year:
+    years = year_dirs()
+    if not years:
         # an empty scan would say "0 folders missing something" and overwrite
         # the day's list: a disk that is not there is an error, not a clean bill
-        raise RootNotFound(f"none of the year folders {', '.join(YEARS)} exists "
-                           f"in {ROOT} (is the drive connected?)")
+        raise RootNotFound(f"no year folder ({YEARS_FROM} or later) in {ROOT} "
+                           f"(is the drive connected?)")
+    exports = []
+    for y in years:
+        exports += find_exports(os.path.join(ROOT, y), progress)
+    _years = years
     print(f"\r  {count[0]} pastas, {len(exports)} *EXPORT*; lendo cada uma...", flush=True)
 
     # Folders of one export FAMILY (Capture One writes one folder per recipe:
@@ -287,7 +311,7 @@ def export_status(d):
 def write_md(rows):
     today = datetime.date.today()
     out = out_dir() / f"{today:%y%m%d}_pastas_para_exportar_tiff.md"
-    lines = [f"# Pastas *EXPORT* em {ROOT}{YEARS[0]}–{YEARS[-1]} (varredura de {today:%Y-%m-%d})", ""]
+    lines = [f"# Pastas *EXPORT* em {scope()} (varredura de {today:%Y-%m-%d})", ""]
     for cat, title in CATEGORIES.items():
         mine = [r for r in rows if r["cat"] == cat]
         lines += [f"## {cat}. {title} ({len(mine)})", ""]
@@ -307,6 +331,7 @@ def write_md(rows):
 _rows = []
 _allowed = set()
 _scan_lock = threading.Lock()
+_state_lock = threading.Lock()      # save_state: one writer at a time
 
 
 def rescan():
@@ -333,6 +358,16 @@ def load_state():
         return json.loads(state_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def save_state(data):
+    """Write the checks atomically, one writer at a time: two requests at once
+    shared the .tmp and one of them failed (PermissionError on Windows)."""
+    state = state_path()
+    tmp = state.with_suffix(".tmp")
+    with _state_lock:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, state)
 
 
 def inline(text):
@@ -413,9 +448,18 @@ function refresh() {
     const items = sec.querySelectorAll('li[data-key]'); const d = [...items].filter(li => state[li.dataset.key]).length;
     sec.querySelector('h2 span').textContent = d + ' / ' + items.length; });
 }
+// one save at a time, the newest state last: two quick clicks could otherwise
+// arrive in the wrong order and the older state would be the one kept
+let saving = false, again = false;
 async function save() {
-  try { const r = await fetch('/state', {method: 'POST', body: JSON.stringify(state)});
-    if (!r.ok) throw 0; } catch (e) { toast('Não salvou — o script ainda está rodando?'); }
+  if (saving) { again = true; return; }
+  saving = true;
+  try {
+    do { again = false;
+      const r = await fetch('/state', {method: 'POST', body: JSON.stringify(state)});
+      if (!r.ok) throw 0; } while (again);
+  } catch (e) { toast('Não salvou — o script ainda está rodando?'); }
+  finally { saving = false; }
 }
 document.addEventListener('change', e => {
   if (e.target.id === 'hide') { document.body.classList.toggle('hide', e.target.checked);
@@ -475,8 +519,7 @@ def render(rows, state):
                          f'<div class="body">{link(r["path"], r["key"], "p parent")}'
                          f'{"".join(sub)}</div></li>')
         parts.append("</ul></section>")
-    scope = html.escape(f"{ROOT}{YEARS[0]}–{YEARS[-1]}")
-    return (PAGE.replace("__SCOPE__", scope).replace("__NAV__", "".join(nav))
+    return (PAGE.replace("__SCOPE__", html.escape(scope())).replace("__NAV__", "".join(nav))
                 .replace("__BODY__", "\n".join(parts))
                 .replace("__STATE__", json.dumps(state).replace("</", "<\\/")))
 
@@ -485,9 +528,10 @@ LOCAL_HOSTS = ("127.0.0.1", "localhost")
 
 
 def request_allowed(host, origin):
-    """Only this machine's own page may POST: Host must be 127.0.0.1:PORT or
-    localhost:PORT, and an Origin, if the browser sent one, must be http:// +
-    one of those (a page from another site gets 403)."""
+    """Only this machine's own page is served or may POST: Host must be
+    127.0.0.1:PORT or localhost:PORT (a page that rebinds its own name to
+    127.0.0.1 sends its name), and an Origin, if the browser sent one, must be
+    http:// + one of those (a page from another site gets 403)."""
     ok = {f"{h}:{PORT}" for h in LOCAL_HOSTS}
     if host is None or host.lower() not in ok:
         return False
@@ -518,6 +562,9 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(n).decode("utf-8") or "null")
 
     def do_GET(self):
+        # the page lists the folder names: never to another site (DNS rebinding)
+        if not request_allowed(self.headers.get("Host"), self.headers.get("Origin")):
+            return self._send(403)
         if self.path != "/":
             return self._send(404)
         with _scan_lock:
@@ -537,10 +584,7 @@ class Handler(BaseHTTPRequestHandler):
             data = self._json()
             if not isinstance(data, dict):
                 return self._send(400)
-            state = state_path()
-            tmp = state.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, state)
+            save_state(data)
             return self._send(204)
         if self.path == "/rescan":
             try:

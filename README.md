@@ -142,7 +142,7 @@ python photo_origin_tag.py "D:\Photos\2025\250412_Park"
 ```
 
 ```
-photo-origin-tag 0.6.0 | SIMULATION | overrides: 0 (...\overrides.csv)
+photo-origin-tag 0.7.0 | exiftool 13.59 | SIMULATION | overrides: 0 (...\overrides.csv)
   finding exports ...
   4 export(s) below _EXPORT
   reading exports: 4/4  0:00 elapsed, ~0:00 left
@@ -174,7 +174,7 @@ Simulation: nothing was written. Run again with --apply.
 python photo_origin_tag.py "D:\Photos\2025\250412_Park" --apply
 ```
 
-The summary now says `written` instead of `write`. Run it on as many roots as you like (`python photo_origin_tag.py D:\Photos\2024 D:\Photos\2025 --apply`). A second run changes nothing: an export that already carries the right tags is `ok`, and only its header is read.
+The summary now says `written` instead of `write`. Run it on as many roots as you like (`python photo_origin_tag.py D:\Photos\2024 D:\Photos\2025 --apply`), or on a whole drive (`D:\`): the recycle bin and `System Volume Information` are never entered. A second run changes nothing: an export that already carries the right tags is `ok`, and only its header is read.
 
 **4. Then** let your masters and copies be made again from the tagged exports (in jxl-photo: its sync re-encodes an export whose date changed). The tool never edits a master: tag the exports, rebuild what is made from them.
 
@@ -217,7 +217,9 @@ D:\Photos\2019\190801_Trip,raw,everything here was shot RAW only
 - **Never guesses.** An export with no original, an unexpected mix of originals, a missing label where one is needed or a label that contradicts the files is left alone and listed.
 - **Every write is checked before it counts.** ExifTool writes a temporary copy next to the file (`<name>~origin-tag-tmp-<pid>.tif`). The copy is compared with the original: the image bytes (hashed without decompressing), the ICC profile byte for byte, and every other tag. Only the two tags written may differ, plus the bookkeeping ExifTool updates when it rewrites a file (data offsets, `XMPToolkit`). The tool then checks the original has not changed since it was read, and only then replaces it (`os.replace`, atomic). If anything differs, the copy is deleted, the original stays as it was, and the file is an `error`.
 - **A temporary copy left by a killed run is removed** on the next run, and only when its original still exists.
-- **Hostile paths.** Every file test of the suite runs in a folder with Japanese, `[ ]`, a space and `%` in its name, and with a path over 260 characters. (A path with `%` takes another route: Python makes the copy and ExifTool edits it in place, because ExifTool's `-o` reads `%d`, `%f`, `%e` in an output name as codes.)
+- **One `--apply` at a time.** A second one (a scheduled run starting while you run one by hand) stops before doing anything, exit 2: two runs would compete for the disk and remove each other's temporary copies. The lock is held by the running process, so a killed run leaves none behind.
+- **No mass rewrite without you.** With `--max-rewrites N` (meant for unattended runs), `--apply` writes nothing when more than N writes would change tags an earlier run wrote, exit 4. New exports never count. See [Settings](#settings) for what can cause one.
+- **Hostile paths.** Every file test of the suite runs in a folder with Japanese, `[ ]`, a space and `%` in its name; one test uses a path over 260 characters. (A path with `%` takes another route: Python makes the copy and ExifTool edits it in place, because ExifTool's `-o` reads `%d`, `%f`, `%e` in an output name as codes.)
 
 ## JPEG-only exports (`_EXPORT\JPG_only`)
 
@@ -235,12 +237,13 @@ python photo_origin_tag.py ROOT [ROOT ...] [options]
 
 | Option | What it does |
 |---|---|
-| `ROOT` | folders (or single files) to scan, at any depth; relative paths are made absolute |
+| `ROOT` | folders (or single files) to scan, at any depth, up to a whole drive; relative paths are made absolute |
 | `--apply` | write; without it the run is a simulation |
-| `--overrides <csv>` | another overrides file (default: `overrides.csv` next to the script) |
-| `--report <csv>` | write the report there instead of `Logs\` |
+| `--overrides <csv>` | another overrides file (default: `overrides.csv` next to the script); a file named here that does not exist stops the run (exit 2) |
+| `--report <csv>` | write the report there instead of `Logs\`; if it cannot be written there (open in Excel), it goes to `Logs\` with a warning |
 | `--workers <n>` | files written at once (default 1; see [Speed](#speed)) |
 | `--trio-blue-raw` | a RAW + JPEG + TIFF trio beside the export with a Blue label counts as RAW (a NEF trio also needs the trace); any other label stays review, since Green cannot tell the JPEG from the TIFF |
+| `--max-rewrites <n>` | with `--apply`, write nothing (exit 4) when more than n writes would change tags an earlier run wrote; new exports never count. The report's `reason` says what each one replaces. For unattended runs |
 
 ## Settings
 
@@ -250,6 +253,7 @@ At the top of `photo_origin_tag.py`, under `SETTINGS (edit here)`. The ones you 
 |---|---|---|
 | `EXPORT_FOLDER` | `_EXPORT` | the export folder's name (any case) |
 | `EXPORT_EXTS` | `.tif`, `.tiff` | which exports are tagged |
+| `SKIP_DIRS` | `$RECYCLE.BIN`, `System Volume Information` | folders never entered, at any depth |
 | `JPG_ONLY_FOLDER` / `JPG_ARCHIVE_FOLDER` | `JPG_only` / `JXL_jpeg` | the JPEG-only exports and their archives |
 | `RAW_EXTS` | 22 RAW extensions | what counts as a RAW beside the export |
 | `LABEL_RAW` / `LABEL_NOT_RAW` | `Blue` / `Green` | the Capture One labels |
@@ -257,9 +261,12 @@ At the top of `photo_origin_tag.py`, under `SETTINGS (edit here)`. The ones you 
 | `COMMENT_PREFIX` / `COMMENTS` | `Source: ` ... | the comment's wording |
 | `PROFILE_IN_COMMENT` | `True` | add the original's profile to the comment |
 | `EXIFTOOL` | `exiftool` | the ExifTool command, or its full path |
+| `MAX_REWRITES` | `None` | the `--max-rewrites` limit for every run (`None`: no limit) |
 | `LOG_DIR` | `Logs` | next to the script; the environment variable `PHOTO_ORIGIN_TAG_LOG_DIR` overrides it |
 
-Changing the comment's wording after a first run makes the earlier comments "someone else's text" (refused). Choose it before you apply.
+Changing the comment's wording (`COMMENTS`, `PROFILE_SEP`) after a first run makes the earlier comments "someone else's text" (refused). Choose it before you apply.
+
+Changing a profile's wording (`PROFILE_EXIF_SRGB`, `PROFILE_EXIF_ADOBE`, `PROFILE_NONE`, `PROFILE_UNNAMED`, `PROFILE_MAX_LEN`) is the opposite: the profile is a fact read from the original, so every comment that carries the old wording is rewritten on the next `--apply`, and everything made from those exports (jxl-photo's masters and copies) is made again. The same happens if a new ExifTool reads a profile's name differently. `--max-rewrites` stops such a run before it writes.
 
 ## Exit codes
 
@@ -267,26 +274,34 @@ Changing the comment's wording after a first run makes the earlier comments "som
 |---|---|
 | 0 | everything fine (also a simulation, even with files in review) |
 | 1 | some file errored and stayed as it was (the report says which) |
-| 2 | nothing ran: a root that does not exist, an invalid `overrides.csv`, a bad `--workers`, `tifffile` missing for `--apply` |
+| 2 | nothing ran: a root that does not exist, an invalid or missing `--overrides` file, a bad `--workers` or `--max-rewrites`, `tifffile` missing for `--apply`, ExifTool missing or not answering, another `--apply` running |
 | 3 | the run was aborted (Ctrl+C or an unexpected error); the report is still written, and the files not reached stay `write`, reason `not attempted` |
+| 4 | `--apply` wrote nothing: more writes would change tags an earlier run wrote than `--max-rewrites` allows (the report lists them all, reason `not written`) |
 
 ## Logs
 
-In `Logs\` next to the script: the report CSV of each run (`<date>_<time>_report.csv`) and, for `--apply`, a per-file log of what was written (`<date>_<time>_written.log`).
+In `Logs\` next to the script: the report CSV of each run (`<date>_<time>_report.csv`) and, for `--apply`, a per-file log of what was written (`<date>_<time>_written.log`). A report that cannot be written where `--report` says lands here instead. `photo_origin_tag.lock` is the lock of the running `--apply`; the file stays and only names its last holder.
+
+When the output goes to a file instead of a console, the progress is a plain line a minute instead of one line rewritten in place.
 
 ## Speed
 
-One ExifTool stays open for the whole run (`-stay_open`); it is never started per file. Writing rewrites each TIFF once, so the run is bound by the disk: 40 real exports (6.7 GB) on one HDD took 66 s, about 205 MB/s of reads plus writes, the drive's limit. Two workers were slower on that disk (74 s), so the default is one; try `--workers 2` on an SSD. A run where everything is already tagged only reads headers: about 3 minutes for 7 000 exports.
+One ExifTool stays open for the whole run (`-stay_open`); it is never started per file. Writing rewrites each TIFF once, so the run is bound by the disk: 40 real exports (6.7 GB) on one HDD took 66 s, about 205 MB/s of reads plus writes, the drive's limit. Two workers were slower on that disk (74 s), so the default is one; try `--workers 2` on an SSD. A run where everything is already tagged only reads headers: for the 8 774 exports of that archive (one HDD), from 2½ minutes with a warm disk cache to 11 with a cold one, plus about 40 s to walk a whole drive of 1.4 million files (4 s when the walk is cached).
 
 ## Running it on a schedule
 
-A run with `--apply` before the step that builds your masters keeps new exports tagged. Stop the chain at exit code 2 or above (the tool did not run, or was aborted), so no master is made from an untagged export that day. Exit code 1 means some files errored and stayed as they were; the rest was tagged.
+A run with `--apply` before the step that builds your masters keeps new exports tagged. Some advice from running it that way:
+
+- **Give it the same roots as the step that builds the masters.** If that step reads the whole drive, pass the drive (`G:\`), not a list of year folders: a list has to be edited every January, and a year folder that does not exist yet stops the run (exit 2).
+- **Pass `--max-rewrites`** (50, say): a normal run only tags new exports, which never count, so the limit only trips when something would rewrite tags of earlier runs (see [Settings](#settings)). Then nothing is written, exit 4, and you run it by hand after a look at the report and a backup.
+- **Stop the chain at exit code 2 or above** (the tool did not run, was aborted, or refused a mass rewrite), so no master is made from an untagged export that day. Exit code 1 means some files errored and stayed as they were; the rest was tagged.
+- **Send its output to a log file** (`>> tagger.log 2>&1`): the reason for a 2 or 3 is in it, and the summary of every run.
 
 ## The other script: `pastas_exportar_tiff.py`
 
 The step before the tags, written for the same archive: which camera folders still have JPEG exports without the TIFF export a master needs. It scans the year folders, matches exported JPEGs to TIFFs by photo (the name without profile, version or camera), and opens a checklist in the browser (`127.0.0.1` only), where a click opens the folder in Explorer and the ticks persist between scans. Read-only on the disk; standard library only.
 
-Its messages and categories are in Portuguese, and its root and years (`ROOT`, `YEARS`) are settings at its top, set to that archive. Adapt them before use.
+Its messages and categories are in Portuguese, and its root and first year (`ROOT`, `YEARS_FROM`) are settings at its top, set to that archive: it scans every year folder (`ROOT\<four digits>`) from `YEARS_FROM` on, so a new year is in as soon as its folder exists. Adapt them before use.
 
 ```console
 python pastas_exportar_tiff.py            # scan + checklist page (Ctrl+C ends it)
@@ -299,13 +314,14 @@ python pastas_exportar_tiff.py --no-web   # scan + the .md list only
 python -m pytest tests -q
 ```
 
-146 tests, with the real ExifTool (they are skipped without it). Every file test runs in a folder with Japanese, `[ ]`, a space and `%` in its name; the main fixtures run a second time without the `%`, because the two take different write routes. Every rule of [How it decides](#how-it-decides), every refusal, the re-run, the rollback when a check fails, compressed and uncompressed TIFFs. One end-to-end test runs jxl-photo's encoder on a tagged export when a jxl-photo checkout sits beside this repo (skipped otherwise).
+170 tests, with the real ExifTool (they are skipped without it). Every file test runs in a folder with Japanese, `[ ]`, a space and `%` in its name; the main fixtures run a second time without the `%`, because the two take different write routes. Every rule of [How it decides](#how-it-decides), every refusal, the re-run, the rollback when a check fails, compressed and uncompressed TIFFs. One end-to-end test runs jxl-photo's encoder on a tagged export when a jxl-photo checkout sits beside this repo (skipped otherwise).
 
 ## Changelog
 
 | Version | Date | What it added |
 |---|---|---|
-| **v0.6.0** | 2026-11-11 | `--trio-blue-raw`: a Blue RAW+JPEG+TIFF trio can count as RAW |
+| **v0.7.0** | 2026-11-12 | Fixes from a review: a whole drive as the root (recycle bin skipped, names filtered before any path is made); exit 2 without a working ExifTool, for a missing `--overrides` file and while another `--apply` runs (lock); a report that cannot be written goes to `Logs\` instead of aborting the run; `--max-rewrites` (exit 4); the reason names the warning that kept a profile out; plain progress lines in a log; the checklist scans every year folder from `YEARS_FROM` on, and serves its page only to this machine |
+| v0.6.0 | 2026-11-11 | `--trio-blue-raw`: a Blue RAW+JPEG+TIFF trio can count as RAW |
 | v0.5.0 | 2026-11-11 | Fixes from an audit: paths with `%`; a NEF+JPEG pair without the trace needs a Green label; NX Studio JPEGs carrying the trace; exit codes 0–3 |
 | v0.4.0 | 2026-11-09 | The JPEG exports in `_EXPORT\JPG_only` get the comment |
 | v0.3.0 | 2026-11-08 | The original's colour profile in the comment |

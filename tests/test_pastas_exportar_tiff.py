@@ -22,7 +22,8 @@ def lib(tmp_path, monkeypatch):
     the hostile event folder."""
     root = tmp_path / "G"
     monkeypatch.setattr(pet, "ROOT", str(root) + "\\")
-    monkeypatch.setattr(pet, "YEARS", ("2025",))
+    monkeypatch.setattr(pet, "YEARS_FROM", 2024)
+    monkeypatch.setattr(pet, "_years", [])
     monkeypatch.setenv("PHOTO_ORIGIN_TAG_LOG_DIR", str(tmp_path / "_logs"))
     event = root / "2025" / HOSTILE
 
@@ -247,3 +248,64 @@ def test_main_exits_2_before_scanning_when_the_port_is_taken(server, lib, monkey
     monkeypatch.setattr(sys, "argv", ["pastas_exportar_tiff.py"])
     assert pet.main() == 2
     assert "in use" in capsys.readouterr().err
+
+
+# ------------------------------------------------- review fixes (v0.7.0, F1/F7)
+def test_a_new_year_is_scanned_without_an_edit(lib):
+    """[fails on v0.6.0] YEARS was a fixed tuple: 2027 would never be scanned."""
+    lib("05_Z7", "_EXPORT", "JPG", "DSC_0500.jpg")             # in 2025
+    root = Path(pet.ROOT)
+    for year, stem in (("2027", "DSC_0001"), ("2023", "DSC_0002")):
+        f = root / year / "x" / "01_Zf" / "_EXPORT" / "JPG" / f"{stem}.jpg"
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"")
+    (root / "2025_old").mkdir()                   # not a year folder
+    (root / "2030").write_bytes(b"")              # a file, not a folder
+    assert pet.year_dirs() == ["2025", "2027"]   # 2023 is before YEARS_FROM
+    keys = [r["key"] for r in pet.scan()]
+    assert any(k.startswith("2027") for k in keys)
+    assert not any(k.startswith("2023") for k in keys)
+    assert pet.scope() == f"{pet.ROOT}2025–2027"
+
+
+def _get(port, host=None):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    c.request("GET", "/", headers={"Host": host or f"127.0.0.1:{port}"})
+    r = c.getresponse()
+    body = r.read()
+    c.close()
+    return r.status, body
+
+
+def test_the_page_is_served_only_to_this_machines_page(server):
+    """[fails on v0.6.0] a GET with another site's name (DNS rebinding) got the
+    page, with every folder name in it."""
+    assert _get(server)[0] == 200
+    assert _get(server, f"localhost:{server}")[0] == 200
+    status, body = _get(server, f"evil.example:{server}")
+    assert status == 403 and b"<html" not in body
+
+
+def test_state_saves_at_the_same_time_all_succeed(tmp_path, monkeypatch):
+    """[fails on v0.6.0] the writes shared one .tmp: measured 29 of 200
+    simultaneous saves failing with PermissionError / FileNotFoundError."""
+    monkeypatch.setenv("PHOTO_ORIGIN_TAG_LOG_DIR", str(tmp_path / "_logs"))
+    n, errors = 12, []
+    start = threading.Barrier(n)
+
+    def saver(i):
+        start.wait()
+        for j in range(25):
+            try:
+                pet.save_state({f"row{i}": str(j)})
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+    ts = [threading.Thread(target=saver, args=(i,)) for i in range(n)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert errors == []
+    saved = pet.load_state()
+    assert len(saved) == 1 and list(saved.values()) == ["24"]
+    assert not list((tmp_path / "_logs").glob("*.tmp"))

@@ -47,6 +47,10 @@ from pathlib import Path
 # ============================================================================
 EXPORT_FOLDER = "_EXPORT"            # exports live below <base>\_EXPORT\...
 EXPORT_EXTS = (".tif", ".tiff")
+# Folders never entered, at any depth (any case): Windows' own and the recycle
+# bin. With them skipped a whole drive (G:\) is a safe root, the same scope as
+# a sync that encodes every export on it.
+SKIP_DIRS = ("$RECYCLE.BIN", "System Volume Information")
 JPG_ONLY_FOLDER = "JPG_only"         # <base>\_EXPORT\JPG_only: JPEG exports (no TIFF possible)
 JPG_ARCHIVE_FOLDER = "JXL_jpeg"      # their lossless archives, mirroring the subfolders
 RAW_EXTS = (".nef", ".nrw", ".orf", ".cr2", ".cr3", ".crw", ".arw", ".srf",
@@ -98,6 +102,7 @@ OVERRIDES_FILE = "overrides.csv"     # next to this script unless --overrides
 LOG_DIR = "Logs"                     # next to this script; env PHOTO_ORIGIN_TAG_LOG_DIR
 EXIFTOOL = "exiftool"
 EXIFTOOL_TIMEOUT = 600               # seconds, per call
+EXIFTOOL_START_TIMEOUT = 120         # seconds for the `exiftool -ver` check every run starts with
 EXIFTOOL_STAY_OPEN = True            # one exiftool per worker for the whole run
                                      # (a new process per call cost ~0.3 s, 3x per file)
 READ_BATCH = 200                     # files per planning-time exiftool read
@@ -106,6 +111,20 @@ WRITE_WORKERS = 1                    # files written at once (--workers). Measur
                                      # 2 workers 74 s; reading 25 files ahead made no
                                      # difference -- the run already moves ~205 MB/s,
                                      # the disk's limit (2026-11-07)
+PROGRESS_EVERY = 2                   # seconds between progress updates on a console
+PROGRESS_EVERY_LOG = 60              # ... and when the output goes to a file (one line each)
+# --max-rewrites: the most writes that change tags an earlier run wrote (a
+# comment whose profile changed, a token an override replaces) before --apply
+# refuses to write anything (EXIT_TOO_MANY_REWRITES). None = no limit. New
+# exports never count. A scheduled run passes a limit: a changed PROFILE_*
+# text or another exiftool would otherwise rewrite hundreds of exports in one
+# night, and jxl-photo's sync would rebuild every one of their masters.
+MAX_REWRITES = None
+# One --apply at a time: a lock in the log folder, held by the running process
+# (the OS drops it if the process dies, so nothing goes stale). The file stays;
+# it only says who held it last.
+LOCK_FILE = "photo_origin_tag.lock"
+LOCK_BYTE = 1 << 20                  # the byte locked, past the text (a locked byte cannot be read)
 TEMP_MARK = "~origin-tag-tmp"        # temporary files carry this in the name
 # exiftool's own temporary, when it edits a file in place (a path with a %, see
 # write_item): <name><suffix> next to the file, renamed over it when done.
@@ -131,9 +150,11 @@ JPEG_NEW_EXIF_TAGS = {"IFD0:XResolution", "IFD0:YResolution",
 # Exit codes (a scheduled task stops at EXIT_USAGE and above).
 EXIT_OK = 0
 EXIT_FILE_ERRORS = 1                 # some file errored and stayed as it was
-EXIT_USAGE = 2                       # bad arguments or configuration
+EXIT_USAGE = 2                       # bad arguments or configuration, no exiftool,
+                                     # another --apply running: nothing ran
 EXIT_ABORTED = 3                     # the run was aborted (exception, Ctrl+C)
-VERSION = "0.6.0"
+EXIT_TOO_MANY_REWRITES = 4           # more rewrites than --max-rewrites: nothing written
+VERSION = "0.7.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)
@@ -290,6 +311,85 @@ def _run_exiftool_spawn(args, timeout=EXIFTOOL_TIMEOUT):
             pass
 
 
+def exiftool_version() -> str:
+    """exiftool's version; UsageError when it cannot be run. Without this check
+    a missing or broken exiftool reads as every export being unreadable: exit
+    1, and a scheduled task would go on to make masters from untagged exports."""
+    try:
+        rc, so, se = run_exiftool(["-ver"], timeout=EXIFTOOL_START_TIMEOUT)
+    except Exception as e:  # noqa: BLE001 - not found, died, timed out: all the same here
+        raise UsageError(f"exiftool cannot be run ({EXIFTOOL}): "
+                         f"{type(e).__name__}: {e}") from None
+    ver = so.strip()
+    if rc != 0 or not re.fullmatch(r"\d+(?:\.\d+)+", ver):
+        raise UsageError(f"exiftool did not answer with its version ({EXIFTOOL}): "
+                         f"{(se or so).strip()[:200] or 'no output'}")
+    return ver
+
+
+# ---------------------------------------------------------------------------
+# One --apply at a time
+# ---------------------------------------------------------------------------
+def _lock_byte(fd):
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, LOCK_BYTE, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)       # OSError when someone holds it
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_byte(fd):
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, LOCK_BYTE, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def acquire_run_lock():
+    """Take the run lock (LOCK_FILE in the log folder) or raise UsageError when
+    another process holds it. Returns what release_run_lock needs."""
+    path = log_dir() / LOCK_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
+    except OSError as e:
+        raise UsageError(f"cannot open the run lock {path}: {e}") from None
+    try:
+        _lock_byte(fd)
+    except OSError:
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            holder = os.read(fd, 400).decode("utf-8", "replace").strip()
+        except OSError:
+            holder = ""
+        os.close(fd)
+        raise UsageError(
+            f"another photo-origin-tag --apply is running ({holder or path}): two "
+            f"at once compete for the disk and remove each other's temporary "
+            f"files. Nothing was done.") from None
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"PID {os.getpid()}, since {_dt.datetime.now():%Y-%m-%d %H:%M:%S}"
+                     .encode("utf-8"))
+    except OSError:
+        pass                                      # only the message would miss it
+    return fd
+
+
+def release_run_lock(fd):
+    try:
+        _unlock_byte(fd)
+    except OSError:
+        pass
+    os.close(fd)
+
+
 def _read_chunk(chunk, tags, extra):
     """{key(path): entry} for one exiftool call; raises when the process timed
     out or died, or its answer is not JSON."""
@@ -363,6 +463,15 @@ def jpg_archive_path(path: Path) -> Path:
             / Path(*_below_export(path)[1:], path.stem + ".jxl"))
 
 
+def _walk(root: Path):
+    """(folder, sorted file names) for every folder below root, in a stable
+    order, never entering SKIP_DIRS."""
+    skip = {s.casefold() for s in SKIP_DIRS}
+    for dp, dns, fns in os.walk(root):
+        dns[:] = sorted(d for d in dns if d.casefold() not in skip)
+        yield Path(dp), sorted(fns)
+
+
 def clean_stale_temps(roots):
     """Delete the temporary copies a killed run left behind. Only files named
     <stem><TEMP_MARK>-<pid><ext>[EXIFTOOL_INPLACE_SUFFIX] whose original
@@ -376,40 +485,51 @@ def clean_stale_temps(roots):
         root = Path(root)
         if root.is_file():
             continue
-        for dp, dns, fns in os.walk(root):
-            for fn in fns:
-                m = pat.match(fn)
-                if m and (Path(dp) / (m["stem"] + m["ext"])).exists():
+        for folder, names in _walk(root):
+            for fn in names:
+                m = pat.match(fn) if TEMP_MARK in fn else None
+                if m and (folder / (m["stem"] + m["ext"])).exists():
                     try:
-                        (Path(dp) / fn).unlink()
-                        removed.append(Path(dp) / fn)
+                        (folder / fn).unlink()
+                        removed.append(folder / fn)
                     except OSError:
                         pass
     return removed
 
 
+def _is_export_name(fn: str, below) -> bool:
+    """A file named fn, in a folder whose names below the last EXPORT_FOLDER
+    are `below` (None: no EXPORT_FOLDER above it), is an export to tag."""
+    if below is None or TEMP_MARK in fn:
+        return False
+    ext = os.path.splitext(fn)[1].lower()
+    return ext in EXPORT_EXTS or (ext in JPEG_EXTS and bool(below)
+                                  and below[0].casefold() == JPG_ONLY_FOLDER.casefold())
+
+
 def find_exports(roots):
-    found = []
+    """Every export below the roots. A whole drive is millions of files: the
+    names are filtered before any Path is made."""
+    found, seen = [], set()
+
+    def add(p):
+        if _key(p) not in seen:
+            seen.add(_key(p))
+            found.append(p)
     for root in roots:
         root = Path(root)
         if root.is_file():
-            cands = [root]
-        else:
-            cands = []
-            for dp, dns, fns in os.walk(root):
-                dns.sort()
-                for fn in sorted(fns):
-                    cands.append(Path(dp) / fn)
-        for p in cands:
-            if (TEMP_MARK not in p.name and export_base(p) is not None
-                    and (p.suffix.lower() in EXPORT_EXTS or is_jpg_only_export(p))):
-                found.append(p)
-    seen, uniq = set(), []
-    for p in found:
-        if _key(p) not in seen:
-            seen.add(_key(p))
-            uniq.append(p)
-    return uniq
+            if _is_export_name(root.name, _below_export(root)):
+                add(root)
+            continue
+        for folder, names in _walk(root):
+            below = _below_export(folder / "_")      # the same for every file in it
+            if below is None:
+                continue
+            for fn in names:
+                if _is_export_name(fn, below):
+                    add(folder / fn)
+    return found
 
 
 _sib_cache = {}
@@ -493,6 +613,8 @@ def load_overrides(path: Path):
         raise UsageError(f'{path}: not UTF-8 (save it as "CSV UTF-8")') from None
     except csv.Error as e:
         raise UsageError(f"{path}: not a readable CSV ({e})") from None
+    except OSError as e:                          # a folder, locked, no permission
+        raise UsageError(f"{path}: cannot be read ({e})") from None
     return out
 
 
@@ -524,6 +646,14 @@ def _depth_kind(bits):
     if b and b[0] == "8":
         return "tiff8"
     return None
+
+
+def _depth_review(bits) -> str:
+    """Why an original TIFF's depth decides nothing: not read, or not 8/16."""
+    b = " ".join(str(bits or "").split())
+    if not b:
+        return "cannot read the original TIFF's bit depth"
+    return f"the original TIFF is neither 8- nor 16-bit ({b} bits per sample)"
 
 
 def has_signal(meta: dict) -> bool:
@@ -600,7 +730,7 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
         if label == LABEL_NOT_RAW:
             k = _depth_kind(tiff_bits)
             if k is None:
-                return review(f"cannot read the original TIFF's bit depth ({tiff_bits})")
+                return review(_depth_review(tiff_bits))
             return Decision(k, "RAW+TIFF pair, label Green, TIFF depth",
                             original=names)
         return review(f"RAW+TIFF pair without a Blue/Green label ({label or 'none'})")
@@ -615,7 +745,7 @@ def classify(exts: dict, meta: dict, tiff_bits=None, override=None,
     if tif and not raw and not jpg:
         k = _depth_kind(tiff_bits)
         if k is None:
-            return review(f"cannot read the original TIFF's bit depth ({tiff_bits})")
+            return review(_depth_review(tiff_bits))
         if label == LABEL_RAW and k == "tiff8":
             return review("label Blue but the original is an 8-bit TIFF")
         return Decision(k, "only a TIFF beside, TIFF depth", original=names)
@@ -676,10 +806,23 @@ def profile_label(entry):
         return PROFILE_EXIF_SRGB
     if cs == "2" or (cs == "65535" and interop == "R03"):
         return PROFILE_EXIF_ADOBE
-    clean = (str(entry.get("File:FileType", "")).upper() in ("JPEG", "TIFF")
-             and not entry.get("ExifTool:Error")
-             and not entry.get("ExifTool:Warning"))
-    return PROFILE_NONE if clean else None
+    return PROFILE_NONE if not profile_problem(entry) else None
+
+
+def profile_problem(entry) -> str:
+    """Why exiftool's reading of an original cannot say "no profile", or ""
+    when it read the file cleanly. Even a [minor] warning counts (decided
+    08/11: "no profile" only of a file read cleanly); the report says which."""
+    if entry is None:
+        return "original unreadable"
+    if entry.get("ExifTool:Error"):
+        return f"original unreadable ({_clean_text(entry['ExifTool:Error'])[:80]})"
+    ftype = str(entry.get("File:FileType", ""))
+    if ftype.upper() not in (*JPEG_FILETYPES, *TIFF_FILETYPES):
+        return f"original unreadable (File:FileType {ftype or 'missing'})"
+    if entry.get("ExifTool:Warning"):
+        return f"original read with a warning ({_clean_text(entry['ExifTool:Warning'])[:80]})"
+    return ""
 
 
 def comment_for(kind, profile=None) -> str:
@@ -712,6 +855,7 @@ class Item:
     relation_remove: list = field(default_factory=list)
     comment: str = None       # XPComment to write
     profile: str = None       # the original's colour profile, None = not read
+    rewrite: bool = False     # the write changes tags an earlier run wrote (--max-rewrites)
 
 
 def plan_item(it: Item, meta: dict, overridden: bool):
@@ -781,6 +925,15 @@ def plan_item(it: Item, meta: dict, overridden: bool):
                      f"make the JPEG differ from what its JXL gives back")
     else:
         it.action = "write"
+        # what an earlier run wrote and this write changes (--max-rewrites)
+        changed = []
+        if it.comment is not None and comment_kind(cur_c) is not None:
+            changed.append(f"replaces {cur_c!r}")
+        if it.relation_remove:
+            changed.append(f"removes {', '.join(it.relation_remove)}")
+        if changed:
+            it.rewrite = True
+            it.reason = "; ".join(changed)
 
 
 # ---------------------------------------------------------------------------
@@ -932,20 +1085,31 @@ def write_item(it: Item):
 # Main
 # ---------------------------------------------------------------------------
 class Progress:
+    """N/total and the time left. On a console one line rewritten in place;
+    into a file (a scheduled task's log) a plain line now and then."""
+
     def __init__(self, label):
         self.label, self.t0, self.last = label, time.time(), 0.0
+        try:
+            self.tty = sys.stdout.isatty()
+        except (AttributeError, ValueError):
+            self.tty = False
 
     def __call__(self, n, total, force=False):
         now = time.time()
-        if not force and n < total and now - self.last < 2:
+        every = PROGRESS_EVERY if self.tty else PROGRESS_EVERY_LOG
+        if not force and n < total and now - self.last < every:
             return
         self.last = now
         el = now - self.t0
         eta = (el / n * (total - n)) if n else 0
-        print(f"\r  {self.label}: {n}/{total}  "
-              f"{int(el // 60)}:{int(el % 60):02d} elapsed, "
-              f"~{int(eta // 60)}:{int(eta % 60):02d} left   ",
-              end="", flush=True)
+        line = (f"  {self.label}: {n}/{total}  "
+                f"{int(el // 60)}:{int(el % 60):02d} elapsed, "
+                f"~{int(eta // 60)}:{int(eta % 60):02d} left")
+        if not self.tty:
+            print(line, flush=True)
+            return
+        print(f"\r{line}   ", end="", flush=True)
         if n >= total:
             print()
 
@@ -1052,9 +1216,14 @@ def build_items(exports, overrides, trio_blue_raw=TRIO_BLUE_IS_RAW):
         if src is not None:
             it.profile = profile_label(orig_meta.get(_key(src)))
         plan_item(it, m, ov is not None)
-        if (src is not None and it.profile is None
-                and it.action in ("write", "ok") and not it.reason):
-            it.reason = "original unreadable: its colour profile is not recorded"
+        if src is not None and it.profile is None and it.action in ("write", "ok"):
+            final = (it.comment if it.comment is not None
+                     else str(m.get("IFD0:XPComment", "") or ""))
+            kept = final.startswith(COMMENTS[it.decision.kind] + PROFILE_SEP)
+            note = (f"{profile_problem(orig_meta.get(_key(src)))}: "
+                    + ("the profile an earlier run recorded is kept" if kept
+                       else "its colour profile is not recorded"))
+            it.reason = f"{it.reason}; {note}" if it.reason else note
     return [t[0] for t in items]
 
 
@@ -1087,9 +1256,16 @@ def main(argv=None):
                     default=TRIO_BLUE_IS_RAW,
                     help="a RAW+JPEG+TIFF trio beside the export with a Blue "
                          "label counts as RAW (default: review)")
+    ap.add_argument("--max-rewrites", type=int, default=MAX_REWRITES, metavar="N",
+                    help="with --apply, write nothing (exit 4) when more than N "
+                         "writes would change tags an earlier run wrote; new "
+                         "exports never count (default: no limit)")
     a = ap.parse_args(argv)
     if a.workers < 1:
         print("ERROR: --workers must be at least 1", file=sys.stderr)
+        return EXIT_USAGE
+    if a.max_rewrites is not None and a.max_rewrites < 0:
+        print("ERROR: --max-rewrites must be 0 or more", file=sys.stderr)
         return EXIT_USAGE
     try:
         return _main(a)
@@ -1151,9 +1327,32 @@ def _write_all(items, workers, stamp):
         raise
 
 
-def _finish(items, overrides, report, apply):
-    """The report and the summary: written whatever happened to the run."""
-    write_report(items, report)
+def _write_report_somewhere(items, report: Path, stamp: str):
+    """Write the report; the path written, or None. One that cannot go where
+    asked (open in Excel, a folder that is gone) goes to the log folder: a
+    report never turns a finished run into an aborted one."""
+    try:
+        write_report(items, report)
+        return report
+    except OSError as e:
+        print(f"WARNING: the report could not be written to {report} ({e})")
+    alt = log_dir() / f"{stamp}_report.csv"
+    if _key(alt) == _key(report):
+        alt = log_dir() / f"{stamp}_report_{os.getpid()}.csv"
+    try:
+        write_report(items, alt)
+        print(f"WARNING: the report went to {alt} instead")
+        return alt
+    except OSError as e:
+        print(f"ERROR: no report could be written ({e}); the summary above is all "
+              f"there is", file=sys.stderr)
+        return None
+
+
+def _finish(items, overrides, report, apply, stamp):
+    """The summary and the report, whatever happened to the run. The summary
+    comes first: it is on the screen (or in the log) even when the report
+    cannot be written."""
     from collections import Counter
     c = Counter((it.action, it.decision.kind or "-") for it in items)
     print("\nSummary (action, origin): count")
@@ -1169,6 +1368,10 @@ def _finish(items, overrides, report, apply):
     for ov in overrides:
         if not ov.used:
             print(f"  WARNING: override line {ov.line} matched nothing: {ov.path}")
+    rewrites = sum(1 for it in items if it.rewrite and it.action in ("write", "written"))
+    if rewrites:
+        print(f"\n{rewrites} of the writes change tags an earlier run wrote "
+              f"(the report's reason says what each replaces)")
     rev = [it for it in items if it.action in ("review", "refuse", "error")]
     if rev:
         print(f"\n{len(rev)} file(s) need attention (all in the report):")
@@ -1181,7 +1384,10 @@ def _finish(items, overrides, report, apply):
     if jpg_review:
         print(f"\n{jpg_review} JPEG(s) below {JPG_ONLY_FOLDER} stay without a "
               f"comment; once archived in {JPG_ARCHIVE_FOLDER} they cannot be tagged")
-    print(f"\nReport: {report}")
+    print()
+    written = _write_report_somewhere(items, report, stamp)
+    if written is not None:
+        print(f"Report: {written}")
     if not apply and any(it.action == "write" for it in items):
         print("Simulation: nothing was written. Run again with --apply.")
 
@@ -1196,6 +1402,10 @@ def _main(a):
     for r in a.roots:
         if not Path(r).exists():
             raise UsageError(f"not found: {r}")
+    # a file named by hand that is not there is a typo, not "no overrides"
+    # (the rules would then decide what the file existed to correct)
+    if a.overrides and not Path(a.overrides).is_file():
+        raise UsageError(f"--overrides: no such file: {a.overrides}")
     # absolute, so that the _EXPORT segment and the overrides' paths are seen
     # (abspath, not resolve(): resolve() follows junctions and turns a mapped
     # drive letter into a UNC path, and the overrides' G:\... would not match)
@@ -1203,12 +1413,24 @@ def _main(a):
     ov_path = Path(a.overrides) if a.overrides else \
         Path(__file__).resolve().parent / OVERRIDES_FILE
     overrides = load_overrides(ov_path)
+    ver = exiftool_version()
+    lock = acquire_run_lock() if a.apply else None
+    try:
+        return _run(a, roots, ov_path, overrides, ver)
+    finally:
+        if lock is not None:
+            release_run_lock(lock)
+
+
+def _run(a, roots, ov_path, overrides, ver):
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     report = Path(a.report) if a.report else log_dir() / f"{stamp}_report.csv"
-
-    print(f"photo-origin-tag {VERSION} | {'APPLY' if a.apply else 'SIMULATION'}"
+    limit = a.max_rewrites
+    print(f"photo-origin-tag {VERSION} | exiftool {ver}"
+          f" | {'APPLY' if a.apply else 'SIMULATION'}"
           f" | overrides: {len(overrides)} ({ov_path})"
-          f"{' | trio Blue = RAW' if a.trio_blue_raw else ''}")
+          f"{' | trio Blue = RAW' if a.trio_blue_raw else ''}"
+          f"{f' | max rewrites {limit}' if limit is not None else ''}")
     if a.apply:
         for t in clean_stale_temps(roots):
             print(f"  removed a temporary file left by an interrupted run: {t}")
@@ -1217,14 +1439,33 @@ def _main(a):
     print(f"  {len(exports)} export(s) below {EXPORT_FOLDER}")
     items = build_items(exports, overrides, trio_blue_raw=a.trio_blue_raw)
 
+    rewrites = sum(1 for it in items if it.action == "write" and it.rewrite)
+    held = limit is not None and rewrites > limit
     try:
-        if a.apply:
+        if a.apply and held:
+            for it in items:
+                if it.action == "write":
+                    note = f"not written: {rewrites} rewrites, more than --max-rewrites {limit}"
+                    it.reason = f"{it.reason}; {note}" if it.reason else note
+        elif a.apply:
             _write_all(items, a.workers, stamp)
     finally:
-        _finish(items, overrides, report, a.apply)
+        _finish(items, overrides, report, a.apply, stamp)
+    if held:
+        msg = (f"{rewrites} planned write(s) change tags an earlier run wrote, "
+               f"more than --max-rewrites {limit}")
+        if a.apply:
+            print(f"ERROR: {msg}: nothing was written. Check what each one "
+                  f"replaces (the report's reason), then run without "
+                  f"--max-rewrites, after a backup: the masters made from those "
+                  f"exports will be rebuilt.", file=sys.stderr)
+            return EXIT_TOO_MANY_REWRITES
+        print(f"WARNING: {msg}: with --apply and that limit nothing would be written.")
     return EXIT_FILE_ERRORS if any(it.action == "error" for it in items) else EXIT_OK
 
 
 if __name__ == "__main__":
+    # UTF-8 on both streams: a scheduled task sends them to one log file
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
     sys.exit(main())

@@ -1,4 +1,4 @@
-# photo-origin-tag: especificação (07/11/2026; atualizada em 11/11/2026, v0.5.0)
+# photo-origin-tag: especificação (07/11/2026; atualizada em 12/11/2026, v0.7.0)
 
 Carimba nos TIFFs exportados pelo Capture One **de onde a foto veio**
 (RAW, JPEG, TIFF 8-bit ou TIFF 16-bit), antes do jxl-photo transformá-los em
@@ -40,6 +40,14 @@ cópia em `..\photo-origin-tag_LOCAL` (§5).
    passadas na linha de comando viram caminho absoluto (`os.path.abspath`, não
    `resolve()`, que segue junctions e troca a letra do disco por UNC, e os
    caminhos do `overrides.csv` deixariam de casar).
+   - (12/11, v0.7.0) A raiz pode ser o disco inteiro (`G:\`): a lixeira e o
+     `System Volume Information` nunca são abertos (`SKIP_DIRS`), e os nomes
+     são filtrados antes de virar `Path` (o `G:` tem 1,4 milhão de arquivos;
+     a varredura leva ~40 s, ~4 s numa segunda passada). É o que a tarefa
+     agendada passa: o mesmo escopo do SYNC PHOTOS e do JPG ONLY do jxl-photo,
+     que varrem o `G:\` inteiro. Uma lista de anos (`G:\2024 G:\2025
+     G:\2026`) deixava 2027 de fora e, com um ano que ainda não existe, parava
+     o dia (código 2).
 2. **O original ao lado decide:** o arquivo de `<base>` cujo nome é o MAIOR
    prefixo do nome do export (`DSC_1211_NXstudio_ProPhoto-g22_v1.tif` →
    `DSC_1211_NXstudio.*`).
@@ -85,6 +93,12 @@ cópia em `..\photo-origin-tag_LOCAL` (§5).
   dono, nem um que comece com `Source: `).
 - O `XPComment` deste script com o MESMO tipo e outro perfil (ou sem perfil,
   da v0.2) → reescreve sem override: o perfil é lido do original, não é regra.
+  Mudar o texto de um perfil (`PROFILE_*`) ou um exiftool que leia o nome de
+  outro jeito reescreve TODOS os comentários que o levam, e o SYNC refaz os
+  masters deles. Por isso (v0.7.0) `--max-rewrites N`: com `--apply`, mais de
+  N escritas que mudam tags de uma execução anterior (comentário deste script
+  trocado, token removido) → nada é gravado, código 4, e o relatório diz o que
+  cada uma troca (`replaces ...`, `removes ...`). Export novo nunca conta.
 - Arquivo modificado entre a leitura e a escrita, travado ou em uso → recusa.
 
 ## 4. Segurança da escrita
@@ -109,11 +123,24 @@ cópia em `..\photo-origin-tag_LOCAL` (§5).
   `<cópia>_exiftool_tmp`, também é limpo). Sem `%` segue o `-o`, o caminho de
   todos os arquivos reais.
 - Códigos de saída: 0 = ok; 1 = algum arquivo deu erro e ficou como estava;
-  2 = uso/configuração (raiz inexistente, `overrides.csv` inválido,
-  `--workers`, falta `tifffile`); 3 = execução abortada (exceção, Ctrl+C).
-  O relatório CSV é gravado sempre que o planejamento terminou, inclusive nos
-  abortos (o que não foi alcançado fica `write`, motivo `not attempted`).
-  A tarefa agendada (se um dia existir) deve parar em 2 ou mais.
+  2 = uso/configuração, nada rodou (raiz inexistente, `overrides.csv`
+  inválido, `--overrides` que não existe, `--workers`/`--max-rewrites`
+  inválido, falta `tifffile`, exiftool ausente ou que não responde, outro
+  `--apply` rodando); 3 = execução abortada (exceção, Ctrl+C); 4 =
+  `--max-rewrites` estourado, nada gravado. O relatório CSV é gravado sempre
+  que o planejamento terminou, inclusive nos abortos (o que não foi alcançado
+  fica `write`, motivo `not attempted`). A tarefa agendada para em 2 ou mais.
+- (v0.7.0) Toda execução começa com `exiftool -ver` (versão na linha de
+  cabeçalho). Sem isso, um exiftool ausente ou quebrado fazia todo export
+  "ilegível": código 1, e a tarefa seguia arquivando JPEG sem comentário.
+- (v0.7.0) Um `--apply` por vez: trava no `Logs\photo_origin_tag.lock`
+  (`msvcrt.locking` num byte depois do texto, como as travas do jxl-photo). Quem
+  segura é o processo vivo; um processo morto não deixa trava. O segundo
+  `--apply` sai com 2 antes de limpar temporários (senão apagaria os do
+  primeiro). A simulação não usa a trava.
+- (v0.7.0) O resumo vem ANTES do relatório. Relatório que não pode ser gravado
+  onde o `--report` diz (aberto no Excel) vai para `Logs\` com um aviso; antes
+  isso virava código 3 depois de gravar os arquivos, e a tarefa parava o dia.
 - Um export que o exiftool não consegue ler como o tipo da extensão (vazio,
   1 byte, JPEG com extensão `.tif`) é `error` já na simulação.
 - Relatório CSV + log por execução: cada arquivo com origem, como foi
@@ -132,8 +159,10 @@ cópia em `..\photo-origin-tag_LOCAL` (§5).
   `overrides.csv` do repo é só o modelo vazio.
 - Daqui pra frente: um passo antes do SYNC PHOTOS na tarefa agendada
   (`jxl-photo_LOCAL\run_scheduled_presets.cmd`, desde 11/11): `--apply
-  --trio-blue-raw` em G:\2024-2026; código ≥ 2 = o tagger não rodou e nada
-  mais roda nesse dia (nenhum JPEG é arquivado sem o comentário).
+  --trio-blue-raw`; código ≥ 2 = o tagger não rodou, foi abortado ou recusou
+  uma reescrita em massa, e nada mais roda nesse dia (nenhum JPEG é arquivado
+  sem o comentário). Com a v0.7.0: raiz `G:\` (§2.1), `--max-rewrites 50`, e
+  a saída vai para `jxl-photo_LOCAL\Logs\photo_origin_tag_scheduled.log`.
 - Nenhum preset muda: o SRGB já roda com `--on-regeneration convert`, e o
   JPG MOBILE é o transcoder (JXL → JPEG), que não tem essa trava.
 - Decidido 07/11: grava SÓ nos TIFFs e refaz masters + cópias (sem editar

@@ -86,6 +86,42 @@ README.md (use).
   runs the tagger before SYNC PHOTOS and stops the day at exit code >= 2;
   `JXL 9` stops after its step 2 at >= 2.
 
+## Decisions taken (12/11/2026, v0.7.0, after the Opus review)
+The review is `AI_tools/261112_Opus_review_bugs-melhorias.md` (F1-F8); the
+owner said "fix everything", and the options it recommended were taken.
+- F1: the scheduled task and `JXL 9` pass `G:\` (the drive), not year
+  folders: the same scope as SYNC PHOTOS / JPG ONLY, which read all of G:. A
+  year list left 2027 out, and a year folder not there yet stopped the day.
+  `SKIP_DIRS` (`$RECYCLE.BIN`, `System Volume Information`) is never entered;
+  `find_exports` filters names before making a Path (G: is 1.4 M files). The
+  two walks (temps, exports) stay separate: the second costs ~4 s (measured).
+  The checklist scans every `ROOT\<yyyy>` from `YEARS_FROM` (2024) on.
+- F2: every run starts with `exiftool -ver` (`exiftool_version`): without a
+  working exiftool, exit 2. Before, every export read as unreadable: exit 1,
+  and the scheduled task went on.
+- F3: the summary prints before the report; a report that cannot be written
+  (open in Excel) goes to `log_dir()` with a WARNING, never exit 3 by itself.
+- F4: `--max-rewrites N` (`MAX_REWRITES`, None in the script): with --apply,
+  more than N writes that change tags an earlier run wrote (`Item.rewrite`:
+  a comment of ours replaced, a token removed; the reason says `replaces ...`
+  / `removes ...`) = nothing written, exit 4 (`EXIT_TOO_MANY_REWRITES`). New
+  exports never count. The scheduled task passes 50; `JXL 9` (simulation
+  first, a human answers) passes none.
+- F5: an `--overrides` path that does not exist = exit 2 (the default file
+  missing is still the empty template).
+- F6: one --apply at a time: `Logs\photo_origin_tag.lock`, `msvcrt.locking`
+  on `LOCK_BYTE` (past the text, so the holder's PID can be read), dropped by
+  the OS when the process dies. A second --apply exits 2 before it cleans
+  temps. Simulations take no lock.
+- F7: the checklist's GET checks Host too (DNS rebinding); `save_state` writes
+  under a lock; the page sends one save at a time, the newest last.
+- F8: `profile_label` uses the `*_FILETYPES` settings (BigTIFF). A `[minor]`
+  warning still means "not read cleanly" (the 08/11 decision stays), but the
+  reason names it (`profile_problem`), and says when an earlier profile is
+  kept. A TIFF depth that was read but is not 8/16 says so
+  (`_depth_review`). Plain progress lines when stdout is not a console;
+  stderr in UTF-8.
+
 ## Rules for changes
 - Settings live at the top of `photo_origin_tag.py`; never repeat them as
   literals.
@@ -109,6 +145,25 @@ README.md (use).
   87 s, v0.2.0 66 s; `--workers 2` 74 s; reading 25 files ahead (tried and
   removed) 66 s = no gain. The run moves ~205 MB/s = the HDD's limit. Do not
   add staging/batching/parallelism for one HDD without a new measurement.
+
+## State (12/11/2026)
+- v0.7.0 (the 12/11 review, F1-F8): 170 tests (146 before; the 24 new ones in
+  `tests/test_review_fixes.py` and `tests/test_pastas_exportar_tiff.py`, and
+  the ones marked [old fails] were run against v0.6.0 and fail there).
+  Released on 12/11 (tag v0.7.0) and copied to `_LOCAL` the same day, together
+  with the `.cmd` / `JXL 9` changes: root `G:\`; the scheduled task also passes
+  `--max-rewrites 50` and sends the tagger's output to
+  `jxl-photo_LOCAL\Logs\photo_origin_tag_scheduled.log` (backups
+  `.bak_261112_before_v0.7.0`). They go together: v0.6.0 does not know
+  `--max-rewrites`.
+- Measured on G: (read only): `find_exports` on the whole drive found the
+  same 8774 exports in 4 s and 33 MB (v0.6.0 with `G:\`: 20 s and 656 MB);
+  1.4 M files, walk 40 s cold / 4 s cached; 0 exports outside 2024-2026, none
+  in `$RECYCLE.BIN`. Simulation with `G:\ --trio-blue-raw --max-rewrites 50`:
+  8774 exports, 8410 of the 8428 TIFF rows with the 08/11 action/origin and
+  the 18 `DSCF` trios `write raw`, `JPG_only` 214 `ok` + 132 `review`, 0
+  rewrites, 0 `error`, exit 0, 635 s with a cold disk cache (exports 6:49,
+  original TIFFs 1:05, original JPEGs 2:27).
 
 ## State (11/11/2026)
 - v0.6.0: `--trio-blue-raw` (A11 as an option), 146 tests. Simulation on

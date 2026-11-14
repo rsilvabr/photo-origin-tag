@@ -167,7 +167,7 @@ EXIT_USAGE = 2                       # bad arguments or configuration, no exifto
                                      # another --apply running: nothing ran
 EXIT_ABORTED = 3                     # the run was aborted (exception, Ctrl+C)
 EXIT_TOO_MANY_REWRITES = 4           # more rewrites than --max-rewrites: nothing written
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 # ============================================================================
 
 _KINDS = tuple(COMMENTS)

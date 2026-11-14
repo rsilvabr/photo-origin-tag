@@ -1,4 +1,4 @@
-# photo-origin-tag: especificação (07/11/2026; atualizada em 12/11/2026, v0.7.0)
+# photo-origin-tag: especificação (07/11/2026; atualizada em 15/11/2026, v0.8.0)
 
 Carimba nos TIFFs exportados pelo Capture One **de onde a foto veio**
 (RAW, JPEG, TIFF 8-bit ou TIFF 16-bit), antes do jxl-photo transformá-los em

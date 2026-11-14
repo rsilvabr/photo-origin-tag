@@ -322,7 +322,8 @@ python -m pytest tests -q
 
 | Version | Date | What it added |
 |---|---|---|
-| **v0.7.0** | 2026-11-12 | Fixes from a review: a whole drive as the root (recycle bin skipped, names filtered before any path is made); exit 2 without a working ExifTool, for a missing `--overrides` file and while another `--apply` runs (lock); a report that cannot be written goes to `Logs\` instead of aborting the run; `--max-rewrites` (exit 4); the reason names the warning that kept a profile out; plain progress lines in a log; the checklist scans every year folder from `YEARS_FROM` on, and serves its page only to this machine |
+| **v0.8.0** | 2026-11-15 | Faster runs on a cold disk: the walk never enters Capture One's own folders (`CaptureOne`: settings and cache, never an export), and the planning opens each file ahead of ExifTool so an on-access antivirus scan overlaps ExifTool's work (`OPEN_AHEAD`). Same tags written, same reports |
+| v0.7.0 | 2026-11-12 | Fixes from a review: a whole drive as the root (recycle bin skipped, names filtered before any path is made); exit 2 without a working ExifTool, for a missing `--overrides` file and while another `--apply` runs (lock); a report that cannot be written goes to `Logs\` instead of aborting the run; `--max-rewrites` (exit 4); the reason names the warning that kept a profile out; plain progress lines in a log; the checklist scans every year folder from `YEARS_FROM` on, and serves its page only to this machine |
 | v0.6.0 | 2026-11-11 | `--trio-blue-raw`: a Blue RAW+JPEG+TIFF trio can count as RAW |
 | v0.5.0 | 2026-11-11 | Fixes from an audit: paths with `%`; a NEF+JPEG pair without the trace needs a Green label; NX Studio JPEGs carrying the trace; exit codes 0–3 |
 | v0.4.0 | 2026-11-09 | The JPEG exports in `_EXPORT\JPG_only` get the comment |

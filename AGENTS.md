@@ -122,7 +122,7 @@ owner said "fix everything", and the options it recommended were taken.
   (`_depth_review`). Plain progress lines when stdout is not a console;
   stderr in UTF-8.
 
-## Decisions taken (15/11/2026, I/O round; branch `io-optimizations`, not released)
+## Decisions taken (15/11/2026, v0.8.0, the I/O round)
 The round after jxl-photo's I/O round of 14/11. Report
 `AI_tools/261115_Claude_report_io-optimizations.md`; probes and results in
 `AI_tools/261115_io_proofs/`.
@@ -191,13 +191,15 @@ The round after jxl-photo's I/O round of 14/11. Report
   only; reading their data ahead was not tried for the planning.
 
 ## State (15/11/2026)
-- Branch `io-optimizations` (local, not pushed, not released): `SKIP_DIRS`
-  with `CaptureOne`, `OPEN_AHEAD`, the docs; 180 tests (the 10 new ones in
-  `tests/test_io_fixes.py`, the [old fails] ones fail on v0.7.0; six mutations
-  caught). Proved: the same 28 exports written byte for byte as v0.7.0 on real
-  copies (both write routes), the same reports; simulation of G:\ with the
-  scheduled task's arguments: the same 8774 report rows as v0.7.0, exit 0.
-  `_LOCAL` still runs v0.7.0 (identical to the tag).
+- v0.8.0 (the I/O round): `SKIP_DIRS` with `CaptureOne`, `OPEN_AHEAD`; 180
+  tests (the 10 new ones in `tests/test_io_fixes.py`, the [old fails] ones
+  fail on v0.7.0; six mutations caught). Proved: the same 28 exports written
+  byte for byte as v0.7.0 on real copies (both write routes), the same
+  reports; simulation of G:\ with the scheduled task's arguments: the same
+  8774 report rows as v0.7.0, exit 0. Released on 15/11 (tag v0.8.0) and
+  copied to `_LOCAL` the same day (its v0.7.0 copy was identical to the tag);
+  the scheduled task and `JXL 9` pass the same arguments, nothing else
+  changed there.
 
 ## State (12/11/2026)
 - v0.7.0 (the 12/11 review, F1-F8): 170 tests (146 before; the 24 new ones in

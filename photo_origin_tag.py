@@ -47,10 +47,14 @@ from pathlib import Path
 # ============================================================================
 EXPORT_FOLDER = "_EXPORT"            # exports live below <base>\_EXPORT\...
 EXPORT_EXTS = (".tif", ".tiff")
-# Folders never entered, at any depth (any case): Windows' own and the recycle
-# bin. With them skipped a whole drive (G:\) is a safe root, the same scope as
-# a sync that encodes every export on it.
-SKIP_DIRS = ("$RECYCLE.BIN", "System Volume Information")
+# Folders never entered, at any depth (any case): Windows' own, the recycle
+# bin, and Capture One's own folder (its settings and cache, never an export;
+# the cache is often a junction to another disk, and the walk follows
+# junctions). With them skipped a whole drive (G:\) is a safe root, the same
+# scope as a sync that encodes every export on it. On the owner's G: the
+# CaptureOne folders were 793 000 of the 1.36 million names the walk listed
+# (cold walk 68 s -> 48 s, measured 2026-11-15).
+SKIP_DIRS = ("$RECYCLE.BIN", "System Volume Information", "CaptureOne")
 JPG_ONLY_FOLDER = "JPG_only"         # <base>\_EXPORT\JPG_only: JPEG exports (no TIFF possible)
 JPG_ARCHIVE_FOLDER = "JXL_jpeg"      # their lossless archives, mirroring the subfolders
 RAW_EXTS = (".nef", ".nrw", ".orf", ".cr2", ".cr3", ".crw", ".arw", ".srf",

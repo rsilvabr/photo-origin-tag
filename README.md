@@ -253,7 +253,7 @@ At the top of `photo_origin_tag.py`, under `SETTINGS (edit here)`. The ones you 
 |---|---|---|
 | `EXPORT_FOLDER` | `_EXPORT` | the export folder's name (any case) |
 | `EXPORT_EXTS` | `.tif`, `.tiff` | which exports are tagged |
-| `SKIP_DIRS` | `$RECYCLE.BIN`, `System Volume Information` | folders never entered, at any depth |
+| `SKIP_DIRS` | `$RECYCLE.BIN`, `System Volume Information`, `CaptureOne` | folders never entered, at any depth (any case). `CaptureOne` is Capture One's own folder (settings and cache, never an export) |
 | `JPG_ONLY_FOLDER` / `JPG_ARCHIVE_FOLDER` | `JPG_only` / `JXL_jpeg` | the JPEG-only exports and their archives |
 | `RAW_EXTS` | 22 RAW extensions | what counts as a RAW beside the export |
 | `LABEL_RAW` / `LABEL_NOT_RAW` | `Blue` / `Green` | the Capture One labels |

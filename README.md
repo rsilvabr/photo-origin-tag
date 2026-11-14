@@ -286,7 +286,9 @@ When the output goes to a file instead of a console, the progress is a plain lin
 
 ## Speed
 
-One ExifTool stays open for the whole run (`-stay_open`); it is never started per file. Writing rewrites each TIFF once, so the run is bound by the disk: 40 real exports (6.7 GB) on one HDD took 66 s, about 205 MB/s of reads plus writes, the drive's limit. Two workers were slower on that disk (74 s), so the default is one; try `--workers 2` on an SSD. A run where everything is already tagged only reads headers: for the 8 774 exports of that archive (one HDD), from 2½ minutes with a warm disk cache to 11 with a cold one, plus about 40 s to walk a whole drive of 1.4 million files (4 s when the walk is cached).
+One ExifTool stays open for the whole run (`-stay_open`); it is never started per file. Writing rewrites each TIFF once (one ExifTool command; two more read the tags back for the check), so the run is bound by the disk: 40 real exports (6.7 GB) on one HDD took 66 s, about 205 MB/s of reads plus writes, the drive's limit. Two workers were slower on that disk (74 s), so the default is one; try `--workers 2` on an SSD.
+
+A run where everything is already tagged only reads metadata, a few hundred KB of each file at most (a TIFF's directories and its last 64 bytes, a JPEG's header). For the 8 774 exports of that archive (one HDD), walk included, that is about 1½ minutes with a warm disk cache and 5 to 7 with a cold one. On a cold disk the time goes to opening the files, not to reading them: an on-access antivirus scans each file the first time it is opened (on that machine about 19 ms and 350 KB read per file), more than ExifTool's own work on it (5–11 ms). So while ExifTool reads a batch, a thread opens the next files (`OPEN_AHEAD`, up to 400 ahead; 0 turns it off) and the two overlap: 37 → 23 ms a file on cold RAW files, 25 → 22 on camera JPEGs; nothing changes once the antivirus knows the files. The walk of a whole drive never enters Capture One's own folders (`SKIP_DIRS`): on that drive they held 793 000 of the 1.36 million names (with the caches a junction leads to on another disk), and a cold walk took 51 s instead of 72 (1 s when cached).
 
 ## Running it on a schedule
 
@@ -314,7 +316,7 @@ python pastas_exportar_tiff.py --no-web   # scan + the .md list only
 python -m pytest tests -q
 ```
 
-170 tests, with the real ExifTool (they are skipped without it). Every file test runs in a folder with Japanese, `[ ]`, a space and `%` in its name; the main fixtures run a second time without the `%`, because the two take different write routes. Every rule of [How it decides](#how-it-decides), every refusal, the re-run, the rollback when a check fails, compressed and uncompressed TIFFs. One end-to-end test runs jxl-photo's encoder on a tagged export when a jxl-photo checkout sits beside this repo (skipped otherwise).
+180 tests, with the real ExifTool (they are skipped without it). Every file test runs in a folder with Japanese, `[ ]`, a space and `%` in its name; the main fixtures run a second time without the `%`, because the two take different write routes. Every rule of [How it decides](#how-it-decides), every refusal, the re-run, the rollback when a check fails, compressed and uncompressed TIFFs. One end-to-end test runs jxl-photo's encoder on a tagged export when a jxl-photo checkout sits beside this repo (skipped otherwise).
 
 ## Changelog
 

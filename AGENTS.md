@@ -122,6 +122,43 @@ owner said "fix everything", and the options it recommended were taken.
   (`_depth_review`). Plain progress lines when stdout is not a console;
   stderr in UTF-8.
 
+## Decisions taken (15/11/2026, I/O round; branch `io-optimizations`, not released)
+The round after jxl-photo's I/O round of 14/11. Report
+`AI_tools/261115_Claude_report_io-optimizations.md`; probes and results in
+`AI_tools/261115_io_proofs/`.
+- What a cold run costs is OPENING files, not reading them. exiftool reads
+  ~300 KB (counted by the process) per TIFF export and ~90 KB per camera JPEG
+  with `-fast2` (up to 3.5 MB without it); no big file is read in full. The
+  owner's on-access antivirus scans a file on its first open: ~19 ms and
+  ~357 KB read per cold file on the HDD (an attributes-only open: 0.7 ms). It
+  keeps the verdict for a while (a re-open an hour later costs 1 ms), but the
+  exports opened on 14/11 10:00 were scanned again at 00:09 on 15/11.
+- `SKIP_DIRS` gains `CaptureOne` (Capture One's settings and cache, never an
+  export): 793 000 of the 1.36 M names the walk listed, including the caches
+  behind 435 `CaptureOne\Cache` junctions on another disk; cold walk 72 -> 51 s,
+  cached 2.3 -> 1.1 s. Other junctions are still followed, as jxl-photo's
+  `rglob` does (on G: every junction is such a Cache).
+- `OPEN_AHEAD = 400`: while exiftool reads a batch, a thread opens and closes
+  the next files (no data read, no answer changed; 0 = off). It helps when the
+  antivirus has to scan (cold NEFs 36.8 -> 23.4 ms a file, camera JPEGs
+  25.1 -> 21.6, older TIFFs 43.6 -> 37.8) and is neutral when it already knows
+  the files (exports after a cache flush, by halves, 23.5 -> 23.0; one full run
+  each, 207.5 -> 219.3 s, within the run-to-run noise).
+- Not done: stub/partial reads (exiftool's TIFF reader always reads the last
+  64 bytes, `IdentifyTrailer`, with or without `-fast`; the antivirus reads the
+  tail anyway, and a fresh Capture One export keeps its IFDs at the end); a
+  cross-run cache (the 12/11 verdict stands; it is the only way below the
+  antivirus floor); the writes (already one exiftool write per file, 1
+  physical read + 1 write; a run writes 0-18 files); the checklist (directory
+  listings only).
+- Outside the code: NTFS last-access updates are on for G:
+  (`DisableLastAccess = 2`), so every run, a simulation too, writes ~40-110 MB
+  of file records there; an antivirus exclusion for G: would remove most of a
+  cold run, for every tool that reads G:. Both are the owner's decisions.
+- To measure cold without admin rights: read 72 GB of big files the tagger
+  never opens (`evict.py` in the proofs folder) - the file cache empties, the
+  antivirus verdicts stay.
+
 ## Rules for changes
 - Settings live at the top of `photo_origin_tag.py`; never repeat them as
   literals.
@@ -145,6 +182,22 @@ owner said "fix everything", and the options it recommended were taken.
   87 s, v0.2.0 66 s; `--workers 2` 74 s; reading 25 files ahead (tried and
   removed) 66 s = no gain. The run moves ~205 MB/s = the HDD's limit. Do not
   add staging/batching/parallelism for one HDD without a new measurement.
+- Planning, measured 15/11 on G:\ (8774 exports, 12 157 files read, read only):
+  cold as found (the antivirus scanning) 439 s = walk 86 s + exports 263 s
+  (30 ms a file) + originals 86 s; after a cache flush (antivirus warm) 324 s;
+  warm 98 s (exiftool's CPU: 8 ms a TIFF export, 5 ms a JPEG). With the 15/11
+  changes the walk is 51 s cold, and the antivirus wait overlaps exiftool's
+  work (see the decisions of 15/11). The `OPEN_AHEAD` thread opens files
+  only; reading their data ahead was not tried for the planning.
+
+## State (15/11/2026)
+- Branch `io-optimizations` (local, not pushed, not released): `SKIP_DIRS`
+  with `CaptureOne`, `OPEN_AHEAD`, the docs; 180 tests (the 10 new ones in
+  `tests/test_io_fixes.py`, the [old fails] ones fail on v0.7.0; six mutations
+  caught). Proved: the same 28 exports written byte for byte as v0.7.0 on real
+  copies (both write routes), the same reports; simulation of G:\ with the
+  scheduled task's arguments: the same 8774 report rows as v0.7.0, exit 0.
+  `_LOCAL` still runs v0.7.0 (identical to the tag).
 
 ## State (12/11/2026)
 - v0.7.0 (the 12/11 review, F1-F8): 170 tests (146 before; the 24 new ones in

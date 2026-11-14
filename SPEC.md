@@ -48,6 +48,11 @@ cópia em `..\photo-origin-tag_LOCAL` (§5).
      que varrem o `G:\` inteiro. Uma lista de anos (`G:\2024 G:\2025
      G:\2026`) deixava 2027 de fora e, com um ano que ainda não existe, parava
      o dia (código 2).
+   - (15/11) As pastas `CaptureOne` (configurações e cache do Capture One,
+     onde nunca há export) também nunca são abertas (`SKIP_DIRS`). A
+     varredura segue junctions, e um cache movido para outro disco é uma
+     junction `CaptureOne\Cache`: no G: eram 793 mil dos 1,36 milhão de nomes
+     listados, nenhum export; a varredura fria caiu de 72 s para 51 s.
 2. **O original ao lado decide:** o arquivo de `<base>` cujo nome é o MAIOR
    prefixo do nome do export (`DSC_1211_NXstudio_ProPhoto-g22_v1.tif` →
    `DSC_1211_NXstudio.*`).
@@ -146,6 +151,14 @@ cópia em `..\photo-origin-tag_LOCAL` (§5).
 - Relatório CSV + log por execução: cada arquivo com origem, como foi
   decidido, ação (carimbado / já estava / recusado / revisar) e motivo.
 - Progresso na tela (N/total, tempo restante) nas fases longas.
+- (15/11) Leituras do planejamento: enquanto o exiftool lê um lote, uma
+  thread abre (e fecha) os próximos arquivos, no máximo `OPEN_AHEAD` (400)
+  à frente do que ele já respondeu; 0 desliga. O antivírus de acesso varre
+  cada arquivo na primeira abertura (~19 ms e ~350 KB lidos por arquivo frio
+  no HD do dono), mais do que o trabalho do exiftool (5–11 ms); aberto antes,
+  os dois se sobrepõem. Não lê dados nem muda resposta nenhuma: quem lê cada
+  arquivo continua sendo o exiftool, e um arquivo que a thread não consegue
+  abrir fica para ele, como antes.
 
 ## 5. Uso
 

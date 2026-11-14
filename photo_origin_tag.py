@@ -110,6 +110,15 @@ EXIFTOOL_START_TIMEOUT = 120         # seconds for the `exiftool -ver` check eve
 EXIFTOOL_STAY_OPEN = True            # one exiftool per worker for the whole run
                                      # (a new process per call cost ~0.3 s, 3x per file)
 READ_BATCH = 200                     # files per planning-time exiftool read
+OPEN_AHEAD = 400                     # planning reads: a thread opens (and closes) each
+                                     # file up to this many files before exiftool reads
+                                     # it; 0 = off. Opening a cold file is what an
+                                     # on-access antivirus scans (~19 ms a file on the
+                                     # owner's HDD), and exiftool's own work is 5-11 ms
+                                     # a file: opened ahead, the two overlap. Cold NEFs
+                                     # 36.8 -> 23.4 ms a file, camera JPEGs 25.1 -> 21.6;
+                                     # nothing changes when the antivirus already knows
+                                     # the file (measured 2026-11-15)
 WRITE_WORKERS = 1                    # files written at once (--workers). Measured on
                                      # one HDD, 40 real exports (6.7 GB): 1 worker 66 s,
                                      # 2 workers 74 s; reading 25 files ahead made no
@@ -403,26 +412,81 @@ def _read_chunk(chunk, tags, extra):
     return {_key(e.get("SourceFile", "")): e for e in data}
 
 
+def _open_and_close(path):
+    """Open a file for reading and close it, reading nothing: an on-access
+    antivirus scans it now, and its file record reaches the cache."""
+    with open(path, "rb", buffering=0):
+        pass
+
+
+class _OpenAhead:
+    """Open (and close) `paths` in order, in a thread of its own, at most
+    `lead` files past the last one exiftool has answered, so that what a cold
+    open costs (an antivirus scan, the file record) is paid while exiftool
+    parses the files before it. It reads no data and changes no answer: a file
+    it cannot open is left to exiftool, which reports it as before."""
+
+    def __init__(self, paths, lead):
+        self._paths, self._lead = paths, lead
+        self._done, self._stop = 0, False
+        self._cv = threading.Condition()
+        self._thread = threading.Thread(target=self._run, name="open-ahead", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        for i, path in enumerate(self._paths):
+            with self._cv:
+                while not self._stop and i >= self._done + self._lead:
+                    self._cv.wait()
+                if self._stop:
+                    return
+            try:
+                _open_and_close(path)
+            except Exception:  # noqa: BLE001 - exiftool meets the same file and says why
+                pass
+
+    def answered(self, n):
+        """exiftool has answered the first n paths."""
+        with self._cv:
+            self._done = n
+            self._cv.notify_all()
+
+    def close(self):
+        with self._cv:
+            self._stop = True
+            self._cv.notify_all()
+        self._thread.join()
+
+
 def read_tags(paths, tags, extra=(), progress=None):
     """{key(path): entry} for every path exiftool answered; a path missing
     from the result could not be read (the caller decides what that means).
     A batch that fails as a whole (timeout, exiftool died, an answer that is
-    not JSON) is read again file by file, so one bad file only costs itself."""
+    not JSON) is read again file by file, so one bad file only costs itself.
+    The files are opened ahead of exiftool (OPEN_AHEAD) by a thread that
+    stops when the read ends, however it ends."""
     out = {}
     paths = list(paths)
-    for i in range(0, len(paths), READ_BATCH):
-        chunk = paths[i:i + READ_BATCH]
-        try:
-            out.update(_read_chunk(chunk, tags, extra))
-        except (TimeoutError, OSError, ValueError):   # ValueError: bad JSON, newline
-            if len(chunk) > 1:
-                for p in chunk:
-                    try:
-                        out.update(_read_chunk([p], tags, extra))
-                    except (TimeoutError, OSError, ValueError):
-                        pass
-        if progress:
-            progress(min(i + READ_BATCH, len(paths)), len(paths))
+    ahead = _OpenAhead(paths, OPEN_AHEAD) if OPEN_AHEAD > 0 and len(paths) > 1 else None
+    try:
+        for i in range(0, len(paths), READ_BATCH):
+            chunk = paths[i:i + READ_BATCH]
+            try:
+                out.update(_read_chunk(chunk, tags, extra))
+            except (TimeoutError, OSError, ValueError):   # ValueError: bad JSON, newline
+                if len(chunk) > 1:
+                    for p in chunk:
+                        try:
+                            out.update(_read_chunk([p], tags, extra))
+                        except (TimeoutError, OSError, ValueError):
+                            pass
+            if ahead is not None:
+                ahead.answered(i + len(chunk))
+            if progress:
+                progress(min(i + READ_BATCH, len(paths)), len(paths))
+    finally:
+        if ahead is not None:
+            ahead.close()
     return out
 
 
